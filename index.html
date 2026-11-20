@@ -27,6 +27,15 @@ button:disabled { opacity: .5; cursor: default }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 10px }
 .playback input { flex: 1 1 175px }
 output { min-width: 135px; font-variant-numeric: tabular-nums }
+h2 { margin: 0 0 4px; font-size: 1.1rem }
+.chart-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; margin-top: 14px }
+.chart-grid > div { min-width: 0 }
+.chart-grid h3 { margin: 0 0 6px; font-size: .94rem }
+.chart-grid canvas { height: 250px }
+#profile { height: 320px; margin-top: 16px }
+details { margin-top: 12px; color: #b2c2d3 }
+code { overflow-wrap: anywhere }
+@media(max-width: 910px) { .chart-grid { grid-template-columns: repeat(auto-fit,minmax(240px,1fr)) } }
 canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 14px 0 0; font-size: .85rem }
 .call { color: #63deae } .flip { color: #f9c87b } .put { color: #ff9f9a }
@@ -42,7 +51,8 @@ canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
   <label id="lag-label" hidden>Lag (minutes)<input id="lag" type="number" min="0" max="1440" value="15"></label>
   <label class="check"><input type="checkbox" id="freeze">Freeze levels before open</label>
   <label class="file">Import capture JSON<input id="capture" type="file" accept=".json,application/json" multiple></label>
-  <label class="file">Import price CSV<input id="bars" type="file" accept=".csv,text/csv"></label>
+  <label>Price series<select id="instrument"><option value="underlying">Same as options</option><option value="ES">ES (SPX basis)</option></select></label>
+  <label class="file">Import price CSV<input id="bars" type="file" accept=".csv,.txt,.itxt,text/csv,text/plain"></label>
 </div>
 <p id="error" role="alert"></p>
 <p id="status" role="status"></p>
@@ -56,7 +66,26 @@ canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
   </div>
   <dl class="metrics" id="metrics"></dl>
   <canvas id="chart" role="img" aria-label="Point-in-time price and gamma exposure chart"></canvas>
-  <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">HVL / flip</span><span class="put">Put wall</span><span>Net GEX</span></div>
+  <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Net GEX</span></div>
+</section>
+<section id="analytics">
+  <h2>Options snapshot</h2>
+  <p id="analytics-status" role="status"></p>
+  <div class="toolbar">
+    <label>Expiration focus<select id="expiry-focus"><option value="all">All expiries</option><option value="same">0DTE</option><option value="largest">Largest open interest</option><option value="next">Nearest expiry</option></select></label>
+  </div>
+  <div class="chart-grid">
+    <div><h3>Net GEX by strike</h3><canvas id="strike-net" role="img" aria-label="Net gamma exposure by strike"></canvas></div>
+    <div><h3>Call vs. put GEX</h3><canvas id="strike-sides" role="img" aria-label="Call and put gamma exposure by strike"></canvas></div>
+    <div><h3>Open interest by strike</h3><canvas id="strike-oi" role="img" aria-label="Call and put open interest by strike"></canvas></div>
+  </div>
+  <canvas id="profile" role="img" aria-label="Repriced net gamma profile with positive and negative regions and zero crossings"></canvas>
+  <p id="profile-status"></p>
+  <details>
+    <summary>Importing market data</summary>
+    <p>For the strike charts, import capture JSON with timestamped option chains. Each snapshot needs <code>symbol, expiry, expiration, snapshotAt, observedAt, spot, contracts</code>. Each contract needs <code>strike, expirationAt, right, iv, gamma, openInterest</code>. Use <code>C</code> or <code>P</code>, decimal IV, and offset-aware timestamps including the contract’s actual AM or PM settlement time. Use null for unknown observed time and select Historical estimate. The browser reads these files locally.</p>
+    <p>Price CSV accepts <code>timestamp,open,high,low,close</code> with bar-close timestamps, or a Sierra Chart one-minute Write Bar Data to File export with UTC enabled and YYYY/MM/DD selected. For SPX options with ES bars, select ES (SPX basis). The chart maps each SPX level using the latest eligible ES close at or before the SPX quote, within two minutes.</p>
+  </details>
 </section>
 <script>
 "use strict";
@@ -66,7 +95,7 @@ const dateFormat = new Intl.DateTimeFormat("en-CA", {timeZone: zone, year: "nume
 const timeFormat = new Intl.DateTimeFormat("en-GB", {timeZone: zone, hour: "2-digit", minute: "2-digit", second: "2-digit"});
 const number = new Intl.NumberFormat("en-US", {maximumFractionDigits: 2});
 const compact = new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 2});
-const fields = {callWall: ["Call wall", "#63deae"], flip: ["HVL / flip", "#f9c87b"], putWall: ["Put wall", "#ff9f9a"]};
+const fields = {callWall: ["Call wall", "#63deae"], flip: ["Gamma flip", "#f9c87b"], putWall: ["Put wall", "#ff9f9a"]};
 const sessions = new Map();
 const barsBySession = new Map();
 let cursor = 0;
@@ -89,42 +118,61 @@ function importCapture(capture) {
   }
   const rows = capture.snapshots.map(row => {
     const snapshotAt = parseTime(row.snapshotAt);
-    const observedAt = parseTime(row.observedAt);
-    if (snapshotAt > observedAt || sessionDate(snapshotAt) !== capture.date ||
+    const observedAt = row.observedAt == null ? null : parseTime(row.observedAt);
+    if ((observedAt != null && snapshotAt > observedAt) || sessionDate(snapshotAt) !== capture.date ||
         typeof row.symbol !== "string" || typeof row.expiry !== "string") {
       throw new Error("Invalid snapshot date, availability time, or instrument.");
     }
     for (const field of ["spot", "netGex", ...Object.keys(fields)]) {
       if (row[field] != null && !Number.isFinite(row[field])) throw new Error("Invalid numeric field: " + field);
     }
-    return {...row, snapshotAt, observedAt};
+    const signatures = new Set();
+    const contracts = row.contracts?.map(contract => {
+      const expirationAt = parseTime(contract.expirationAt);
+      const multiplier = contract.multiplier ?? 100;
+      const {strike, iv, gamma, openInterest, right} = contract;
+      if (!["C","P"].includes(right) || ![strike, iv, gamma, openInterest, multiplier].every(Number.isFinite)
+          || strike <= 0 || iv <= 0 || gamma < 0 || !Number.isInteger(openInterest) || openInterest < 0
+          || multiplier <= 0 || expirationAt <= snapshotAt || !(row.spot > 0)) {
+        throw new Error("Invalid option contract, spot, or settlement time.");
+      }
+      const signature = [contract.root ?? row.symbol, expirationAt, strike, right].join(":");
+      if (signatures.has(signature)) throw new Error("Duplicate option contract within a snapshot.");
+      signatures.add(signature);
+      return {...contract, expirationAt, multiplier};
+    });
+    return {...row, snapshotAt, observedAt, contracts};
   });
   let lastKey;
   for (const row of rows) {
     lastKey = [capture.source, capture.date, row.symbol, row.expiry].join(" • ");
-    if (!sessions.has(lastKey)) sessions.set(lastKey, {date: capture.date, source: capture.source, rows: new Map()});
+    if (!sessions.has(lastKey)) sessions.set(lastKey, {date: capture.date, source: capture.source, symbol: row.symbol, rows: new Map()});
     const session = sessions.get(lastKey);
     const key = [row.expiration, row.snapshotAt].join(":");
     const prior = session.rows.get(key);
-    if (!prior || row.observedAt < prior.observedAt) session.rows.set(key, row);
+    if (!prior || (row.observedAt ?? Infinity) < (prior.observedAt ?? Infinity)) session.rows.set(key, row);
   }
   return lastKey;
 }
 
 function parseBars(text, date) {
   const [header, ...rows] = text.trim().split(/\r?\n/);
-  if (header.toLowerCase().replace(/\s/g, "") !== "timestamp,open,high,low,close") {
-    throw new Error("CSV columns must be timestamp,open,high,low,close.");
+  const cells = line => line.split(",").map(value => value.trim().replace(/^"|"$/g, ""));
+  const names = cells(header).map(value => value.toLowerCase());
+  const sierra = names.includes("date") && names.includes("time") && (names.includes("last") || names.includes("close"));
+  const indexes = ["open","high","low",names.includes("close") ? "close" : "last"].map(name => names.indexOf(name));
+  if (!(sierra || names.includes("timestamp")) || indexes.includes(-1)) {
+    throw new Error("Use timestamp,open,high,low,close or a Sierra Chart one-minute UTC export.");
   }
   const bars = new Map();
   for (const line of rows.filter(line => line.trim())) {
-    const columns = line.split(",").map(value => value.trim());
-    const at = parseTime(columns[0]);
+    const columns = cells(line);
+    const stamp = sierra ? columns[names.indexOf("date")].replaceAll("/", "-") + "T" + columns[names.indexOf("time")] + "Z" : columns[names.indexOf("timestamp")];
+    const at = parseTime(stamp) + (sierra ? 60000 : 0);
     if (sessionDate(at) !== date) continue;
-    const [open, high, low, close] = columns.slice(1).map(Number);
-    if (columns.length !== 5 || columns.some(value => !value) ||
-        ![open, high, low, close].every(Number.isFinite) ||
-        high < Math.max(open, close) || low > Math.min(open, close)) {
+    const [open, high, low, close] = indexes.map(index => columns[index] ? Number(columns[index]) : NaN);
+    if (![open, high, low, close].every(Number.isFinite)
+        || high < Math.max(open, close) || low > Math.min(open, close)) {
       throw new Error("Invalid OHLC values in the price CSV.");
     }
     bars.set(at, {at, open, high, low, close});
@@ -139,7 +187,7 @@ function selection() {
   const lag = Math.min(1440, Math.max(0, Number($("lag").value) || 0));
   const rows = [...session.rows.values()].map(row => ({
     ...row, at: historical ? row.snapshotAt + lag * 60000 : row.observedAt,
-  })).filter(row => sessionDate(row.at) === session.date)
+  })).filter(row => row.at != null && sessionDate(row.at) === session.date)
     .sort((a, b) => a.at - b.at || a.snapshotAt - b.snapshotAt);
   const bars = barsBySession.get($("session").value) ?? [];
   const times = [...new Set([...rows.map(row => row.at), ...bars.map(bar => bar.at)])].sort((a, b) => a - b);
@@ -163,7 +211,13 @@ function render() {
   const visible = rows.filter(row => row.at <= current);
   const last = visible.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
   const mapRows = $("freeze").checked ? visible.filter(row => timeFormat.format(row.at) < "09:30:00") : visible;
-  const map = mapRows.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
+  const mapRow = mapRows.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
+  const mapAnalysis = analyze(mapRow);
+  const lastAnalysis = last === mapRow ? mapAnalysis : analyze(last);
+  const map = mapAnalysis ? {...mapRow, ...mapAnalysis.levels} : mapRow;
+  const futures = $("instrument").value === "ES";
+  const mapped = futures ? esMap(map, bars, session.symbol) : map;
+  const displayBars = futures && session.symbol !== "SPX" ? [] : bars;
   $("scrub").max = Math.max(0, times.length - 1);
   $("scrub").value = cursor;
   $("prev").disabled = !cursor;
@@ -177,19 +231,23 @@ function render() {
     historical ? "Historical estimate. Availability is assumed." : "Observed availability.",
     !rows.length ? "No gamma snapshots were available on this session date under the selected clock." : "",
     $("freeze").checked && !map ? "No eligible premarket map." : "",
+    futures && session.symbol !== "SPX" ? "ES mapping requires SPX options and ES bars." : "",
+    futures && session.symbol === "SPX" && map && !mapped ? "ES levels unavailable without a synchronized ES bar." : "",
   ].filter(Boolean).join(" ");
   $("metrics").replaceChildren(
-    metric("Vendor spot", last?.spot == null ? null : number.format(last.spot)),
-    metric("Net GEX", last?.netGex == null ? null : compact.format(last.netGex)),
-    ...Object.entries(fields).map(([field, [label]]) => metric(label, map?.[field] == null ? null : number.format(map[field]))),
+    metric(session.symbol + " snapshot spot", last?.spot == null ? null : number.format(last.spot)),
+    metric("Net GEX", (lastAnalysis?.netGex ?? last?.netGex) == null ? null : compact.format(lastAnalysis?.netGex ?? last.netGex)),
+    ...Object.entries(fields).map(([field, [label]]) => metric((field === "flip" && !mapAnalysis ? "Vendor HVL" : label) + (futures ? " · ES" : ""), mapped?.[field] == null ? null : number.format(mapped[field]))),
     metric("Map snapshot · ET", map ? timeFormat.format(map.snapshotAt) : null),
     metric("Available at · ET", map ? timeFormat.format(map.at) : null),
   );
-  $("price-legend").textContent = bars.length ? "Imported price bars" : "Vendor sampled spot";
-  draw(current, times[0], visible, bars.filter(bar => bar.at <= current), map);
+  $("price-legend").textContent = displayBars.length ? (futures ? "ES price bars" : session.symbol + " price bars") : (futures ? "ES price bars unavailable" : "Vendor sampled spot");
+  draw(current, times[0], visible.map(row => ({...row, netGex: analyze(row,true)?.netGex ?? row.netGex})),
+    displayBars.filter(bar => bar.at <= current), mapped, futures);
+  drawAnalytics(mapAnalysis, map, session.symbol);
 }
 
-function draw(current, start, rows, bars, map) {
+function draw(current, start, rows, bars, map, futures) {
   const canvas = $("chart");
   const {width, height} = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -201,9 +259,9 @@ function draw(current, start, rows, bars, map) {
   ctx.fillStyle = "#101925";
   ctx.fillRect(0, 0, width, height);
   const left = 64, right = width - 16, top = 22, base = height - 110;
-  const spot = rows.filter(row => row.spot != null);
+  const spot = futures ? [] : rows.filter(row => row.spot != null);
   const values = [...bars.flatMap(bar => [bar.low, bar.high]), ...spot.map(row => row.spot),
-    ...Object.keys(fields).map(field => map?.[field]).filter(Number.isFinite)];
+    ...Object.keys(fields).map(field => map?.[field]).filter(Number.isFinite), ...(map?.flipBand ?? [])];
   const net = rows.filter(row => row.netGex != null);
   const x = time => left + (right - left) * (time - start) / Math.max(60000, current - start);
 
@@ -230,6 +288,11 @@ function draw(current, start, rows, bars, map) {
       ctx.fillStyle = "#b2c2d3";
       ctx.fillText(number.format(value), 5, y(value) + 4, 55);
       line(left, y(value), right, y(value), "#25374c");
+    }
+    if (map?.flipBand && map.flipBand.every(v => v >= low && v <= high)) {
+      const [lower, upper] = map.flipBand;
+      ctx.fillStyle = "#f9c87b29";
+      ctx.fillRect(x(map.at), y(upper), Math.max(1, x(current) - x(map.at)), y(lower) - y(upper));
     }
     for (const [key, [, color]] of Object.entries(fields)) {
       if (map?.[key] != null) line(x(map.at), y(map[key]), right, y(map[key]), color, [5, 5]);
@@ -276,6 +339,7 @@ function draw(current, start, rows, bars, map) {
 function refreshSessions(key) {
   $("session").replaceChildren(...[...sessions.keys()].map(name => new Option(name, name)));
   $("session").value = key;
+  $("instrument").value = sessions.get(key).defaultInstrument ?? "underlying";
   cursor = 0;
   render();
 }
@@ -285,21 +349,35 @@ function demo() {
   const start = Date.parse(date + "T09:12:00-05:00");
   const snapshots = [];
   const bars = [];
-  const price = i => 521 + 0.083 * i + 2.3 * Math.sin(i / 7) + 0.43 * Math.sin(i * 2.1);
-  for (let i = 0; i < 65; i++) {
-    const at = start + i * 120000;
-    const open = price(i - 1), close = price(i);
-    bars.push({at, open, close, high: Math.max(open, close) + .3, low: Math.min(open, close) - .34});
-    if (i % 5 === 0) snapshots.push({
-      symbol: "QQQ", expiry: "ALL", expiration: date, snapshotAt: new Date(at).toISOString(),
-      observedAt: new Date(at + 120000).toISOString(), spot: close,
-      netGex: Math.round(85e6 * Math.cos(i / 10)), callWall: i < 40 ? 528 : 530, flip: i < 35 ? 523 : 526, putWall: 516,
-    });
+  const price = i => 6580 + .75*i + 27*Math.sin(i/7) + 4*Math.sin(i*2.1);
+  for (let i=0; i<65; i++) {
+    const at = start + i*120000, spot = price(i);
+    const open = price(i-1)+21, close = spot+21;
+    bars.push({at,open,close,high:Math.max(open,close)+3,low:Math.min(open,close)-3.4});
+    if (i % 5) continue;
+    const contracts = [];
+    for (const expiry of ["2026-11-19","2026-11-27","2026-12-18"]) {
+      const expirationAt = expiry + "T16:00:00-05:00";
+      const days = (Date.parse(expirationAt)-at)/yearMs;
+      for (let strike=6240; strike<=6920; strike+=10) {
+        for (const right of ["C","P"]) {
+          const center = right === "C" ? 6680+i*.45 : 6510+i*.28;
+          const iv = .15 + Math.abs(strike/spot-1)*.9 + (right === "P" ? .015 : 0);
+          const openInterest = Math.round((expiry === date ? 5000 : 2900) *
+            Math.exp(-(((strike-center)/91)**2)) * (.7+.3*Math.cos(strike/12)));
+          contracts.push({strike,expirationAt,right,iv,openInterest,gamma:modelGamma(spot,strike,iv*Math.sqrt(days))});
+        }
+      }
+    }
+    snapshots.push({symbol:"SPX", expiry:"Chain", expiration:date,
+      snapshotAt:new Date(at).toISOString(), observedAt:new Date(at+120000).toISOString(), spot, contracts});
   }
-  const key = importCapture({version: 1, source: "Synthetic demo", date, snapshots});
-  barsBySession.set(key, bars);
+  const key=importCapture({version:1,source:"Synthetic demo",date,snapshots});
+  sessions.get(key).defaultInstrument="ES";
+  $("instrument").value="ES";
+  barsBySession.set(key,bars);
   refreshSessions(key);
-  cursor = 15;
+  cursor=15;
   render();
 }
 
@@ -324,7 +402,11 @@ $("prev").onclick = () => { stop(); cursor--; render(); };
 $("next").onclick = () => { stop(); cursor++; render(); };
 $("scrub").oninput = event => { stop(); cursor = Number(event.target.value); render(); };
 for (const id of ["session", "clock", "lag"]) $(id).onchange = () => { stop(); cursor = 0; render(); };
-$("freeze").onchange = render;
+for (const id of ["freeze", "instrument", "expiry-focus"]) $(id).onchange = render;
+$("session").addEventListener("change", () => {
+  $("instrument").value = sessions.get($("session").value).defaultInstrument ?? "underlying";
+  render();
+});
 
 $("capture").onchange = async event => {
   stop();
@@ -349,6 +431,210 @@ $("bars").onchange = async event => {
   } catch (error) { $("error").textContent = error.message; }
   event.target.value = "";
 };
+
+const analysisCache = new WeakMap();
+const yearMs = 365.25 * 86400000;
+
+function modelGamma(spot, strike, sigmaRootTime) {
+  const d1 = Math.log(spot / strike) / sigmaRootTime + sigmaRootTime / 2;
+  return Math.exp(-d1 * d1 / 2) / (Math.sqrt(2 * Math.PI) * spot * sigmaRootTime);
+}
+
+function analyze(row, netOnly = false) {
+  if (!row?.contracts?.length) return null;
+  const mode = $("expiry-focus").value;
+  if (!analysisCache.has(row.contracts)) analysisCache.set(row.contracts, new Map());
+  const cache = analysisCache.get(row.contracts);
+  let result = cache.get(mode);
+  if (!result) {
+    const oi = new Map();
+    for (const c of row.contracts) oi.set(c.expirationAt, (oi.get(c.expirationAt) ?? 0) + c.openInterest);
+    const dates = [...oi.keys()].sort((a,b) => a-b);
+    const expiry = mode === "next" ? dates[0] : mode === "largest" ? dates.reduce((a,b) => oi.get(b) > oi.get(a) ? b : a) : null;
+    const date = sessionDate(row.snapshotAt);
+    const contracts = row.contracts.filter(c => mode === "all" ||
+      (mode === "same" ? sessionDate(c.expirationAt) === date : c.expirationAt === expiry));
+    if (!contracts.length) return null;
+    const strikes = new Map();
+    for (const c of contracts) {
+      const bucket = strikes.get(c.strike) ?? {strike:c.strike, call:0, put:0, callOi:0, putOi:0};
+      const gex = c.gamma * c.openInterest * c.multiplier * row.spot ** 2 * .01;
+      if (c.right === "C") {
+        bucket.call += gex;
+        bucket.callOi += c.openInterest;
+      } else {
+        bucket.put -= gex;
+        bucket.putOi -= c.openInterest;
+      }
+      strikes.set(c.strike, bucket);
+    }
+    const buckets = [...strikes.values()].sort((a,b) => a.strike - b.strike)
+      .map(bucket => ({...bucket, net: bucket.call + bucket.put}));
+    result = {buckets, contracts, netGex:buckets.reduce((sum,b) => sum + b.net, 0)};
+    cache.set(mode,result);
+  }
+  if (netOnly || result.profile) return result;
+  const {buckets, contracts} = result;
+  const prepared = contracts.filter(c => c.openInterest > 0).map(c => ({
+    strike:c.strike, volTime:c.iv * Math.sqrt((c.expirationAt - row.snapshotAt) / yearMs),
+    signedWeight:c.openInterest * c.multiplier * .01 * (c.right === "C" ? 1 : -1),
+  }));
+  const profile = Array.from({length: 201}, (_,i) => {
+    const price = row.spot * (.95 + i * .0005);
+    const gex = price ** 2 * prepared.reduce((sum,c) => sum + c.signedWeight * modelGamma(price,c.strike,c.volTime),0);
+    return {price,gex};
+  });
+  const crossings = [];
+  let left = null;
+  for (const point of profile) {
+    if (point.gex === 0) continue;
+    if (left && Math.sign(left.gex) !== Math.sign(point.gex)) {
+      const price = left.price - left.gex * (point.price - left.price) / (point.gex - left.gex);
+      crossings.push({price, band:[left.price,point.price]});
+    }
+    left = point;
+  }
+  const closest = crossings.reduce((a,b) => !a || Math.abs(b.price-row.spot) < Math.abs(a.price-row.spot) ? b : a, null);
+  const call = buckets.reduce((a,b) => b.call > (a?.call ?? 0) ? b : a, null);
+  const put = buckets.reduce((a,b) => b.put < (a?.put ?? 0) ? b : a, null);
+  let maxPain = null;
+  if (new Set(contracts.map(c => c.expirationAt)).size === 1 && prepared.length) {
+    let lowest = Infinity;
+    // Sweep strikes while tracking total intrinsic payout and its slope.
+    const payouts = new Map();
+    for (const c of contracts) {
+      const weight = c.openInterest * c.multiplier;
+      const bucket = payouts.get(c.strike) ?? {call:0,put:0};
+      bucket[c.right === "C" ? "call" : "put"] += weight;
+      payouts.set(c.strike,bucket);
+    }
+    let prior = buckets[0].strike;
+    let value = [...payouts].reduce((sum,[strike,b]) => sum + (strike-prior)*b.put,0);
+    let slope = -[...payouts.values()].reduce((sum,b) => sum + b.put,0);
+    for (const {strike} of buckets) {
+      value += slope * (strike-prior);
+      if (value < lowest) { lowest = value; maxPain = strike; }
+      const bucket = payouts.get(strike);
+      slope += bucket.call + bucket.put;
+      prior = strike;
+    }
+  }
+  return Object.assign(result,{profile,crossings,maxPain,levels:{
+    callWall:call?.strike ?? null, putWall:put?.strike ?? null, flip:closest?.price ?? null, flipBand:closest?.band ?? null,
+  }});
+}
+
+function esMap(map, bars, symbol) {
+  if (symbol !== "SPX" || !(map?.spot > 0)) return null;
+  const bar = bars.findLast(bar => bar.at <= map.snapshotAt);
+  if (!bar || map.snapshotAt - bar.at > 120000) return null;
+  const basis = bar.close - map.spot;
+  const levels = {...map};
+  for (const field of Object.keys(fields)) if (map[field] != null) levels[field] += basis;
+  if (map.flipBand) levels.flipBand = map.flipBand.map(price => price + basis);
+  return levels;
+}
+
+function drawAnalytics(analysis, row, symbol) {
+  $("analytics-status").textContent = analysis
+    ? symbol + " · " + timeFormat.format(row.snapshotAt) + " ET · " + number.format(analysis.contracts.length) + " contracts"
+    : row?.contracts?.length ? "No contracts for the selected expiry focus." : "Import a capture with contract-level data to see these charts.";
+  const labels = analysis ? [
+    analysis.crossings.length ? analysis.crossings.length + (analysis.crossings.length === 1 ? " zero crossing" : " zero crossings") + " within ±5% of spot. The shaded flip zone on the price chart brackets the nearest root." : "No zero crossing within ±5% of spot.",
+    analysis.maxPain == null ? "" : "Max pain " + number.format(analysis.maxPain) + ".",
+    "Calls contribute positive GEX and puts negative GEX. The profile reprices gamma with fixed IV, zero rates and zero dividends.",
+  ] : [];
+  $("profile-status").textContent = labels.filter(Boolean).join(" ");
+  for (const [id,keys,unit] of [
+    ["strike-net",["net"],"$/1% move"],
+    ["strike-sides",["call","put"],"$/1% move"],
+    ["strike-oi",["callOi","putOi"],"contracts"],
+  ]) {
+    const values = analysis?.buckets.filter(b => Math.abs(b.strike/row.spot - 1) <= .05)
+      .map(b => ({price:b.strike, values:keys.map(key => key === "putOi" ? -b[key] : b[key])}));
+    drawDistribution(id, values, row, unit);
+  }
+  drawDistribution("profile", analysis?.profile.map(p => ({price:p.price,values:[p.gex]})), row,
+    "Repriced net GEX ($/1% move)", analysis);
+}
+
+function drawDistribution(id, points, row, unit, profile) {
+  const canvas = $(id);
+  const {width,height} = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = width*dpr;
+  canvas.height = height*dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr,dpr);
+  ctx.font = "12px system-ui";
+  ctx.fillStyle = "#101925";
+  ctx.fillRect(0,0,width,height);
+  ctx.fillStyle = "#b2c2d3";
+  ctx.fillText(unit,12,18);
+  if (!points?.length || width < 110) {
+    ctx.fillText("No eligible data",12,42);
+    return;
+  }
+  const left = 50, right = width-14, top = 37, bottom = height-30;
+  const max = Math.max(1,...points.flatMap(point => point.values.map(Math.abs)));
+  const axis = (top+bottom)/2;
+  const x = price => left + (price / row.spot - .95) * (right-left)/.1;
+  const y = value => axis - value/max*(bottom-top)*.47;
+  const line = (x0,y0,x1,y1,color) => {
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(x0,y0);
+    ctx.lineTo(x1,y1);
+    ctx.stroke();
+  };
+  for (const tick of [-max,0,max]) {
+    ctx.fillStyle = "#b2c2d3";
+    ctx.fillText(compact.format(tick),4,y(tick)+4,42);
+    line(left,y(tick),right,y(tick),tick === 0 ? "#667d97" : "#324258");
+  }
+  for (const offset of [-.05,-.025,0,.025,.05]) {
+    const price = row.spot * (1+offset);
+    ctx.fillText(number.format(price), Math.min(right-29, x(price)-17), height-9, 45);
+  }
+  if (profile) {
+    const edges = [points[0].price, ...profile.crossings.map(root => root.price), points.at(-1).price];
+    for (let i=1; i<edges.length; i++) {
+      const midpoint = (edges[i-1]+edges[i])/2;
+      const point = points.reduce((a,b) => Math.abs(b.price-midpoint) < Math.abs(a.price-midpoint) ? b : a);
+      if (!point.values[0]) continue;
+      ctx.fillStyle = point.values[0] > 0 ? "#63deae13" : "#ff9f9a13";
+      ctx.fillRect(x(edges[i-1]),top,x(edges[i])-x(edges[i-1]),bottom-top);
+    }
+    for (let index=1; index<points.length; index++) {
+      const a=points[index-1], b=points[index];
+      const ga=a.values[0], gb=b.values[0], color = v => v >= 0 ? "#63deae" : "#ff9f9a";
+      if (ga*gb < 0) {
+        const cross=x(a.price)+(x(b.price)-x(a.price))*ga/(ga-gb);
+        line(x(a.price),y(ga),cross,axis,color(ga));
+        line(cross,axis,x(b.price),y(gb),color(gb));
+      } else line(x(a.price),y(ga),x(b.price),y(gb),color(ga || gb));
+    }
+    for (const {price,band} of profile.crossings) {
+      ctx.fillStyle="#f9c87b33";
+      ctx.fillRect(x(band[0]),top,Math.max(2,x(band[1])-x(band[0])),bottom-top);
+      line(x(price),top,x(price),bottom,"#f9c87b");
+    }
+    if (Math.abs(profile.maxPain/row.spot-1)<=.05) {
+      line(x(profile.maxPain),top,x(profile.maxPain),bottom,"#a8b1e8");
+      ctx.fillStyle="#a8b1e8";
+      ctx.fillText("Max pain",Math.min(x(profile.maxPain)+4,right-55),top+12,55);
+    }
+  } else {
+    const barWidth = Math.max(1,Math.min(8,(right-left)/points.length*.72));
+    for (const p of points) {
+      for (const v of p.values) {
+        ctx.fillStyle = v>=0 ? "#63deae" : "#ff9f9a";
+        ctx.fillRect(x(p.price)-barWidth/2,Math.min(axis,y(v)),barWidth,Math.abs(y(v)-axis));
+      }
+    }
+  }
+  line(x(row.spot),top,x(row.spot),bottom,"#9aceff");
+}
 
 demo();
 window.addEventListener("resize", render);
