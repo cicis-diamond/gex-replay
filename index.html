@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GEX Replay</title>
+<style>
+:root { color-scheme: dark; font: 15px system-ui, sans-serif; background: #0d1420; color: #e4edf7 }
+body { max-width: 1160px; margin: auto; padding: 24px }
+h1 { font-size: 2.75rem; letter-spacing: -.06em; margin: 0 0 4px }
+p { color: #b2c2d3; margin: 8px 0 }
+section, .toolbar { border: 1px solid #324258; border-radius: 14px; background: #151f2d; padding: 16px; margin-top: 16px }
+.toolbar { display: flex; align-items: end; flex-wrap: wrap; gap: 12px 16px }
+label { display: grid; gap: 6px; color: #c0cede; font-size: .86rem }
+label.check { display: flex; align-items: center; min-height: 35px; gap: 7px }
+select, button, input[type=number], .file { font: inherit; background: #1e3045; color: #e4edf7; border: 1px solid #506478; padding: 8px 10px; border-radius: 7px }
+input[type=number] { width: 5em }
+button, .file { cursor: pointer }
+button:disabled { opacity: .5; cursor: default }
+.file { display: inline-flex; align-items: center; position: relative }
+.file input { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer }
+.file:focus-within { outline: 2px solid #a9d7ff }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit,minmax(120px,1fr)); gap: 10px }
+.metrics div { background: #101925; border-radius: 8px; padding: 12px }
+.metrics dt { color: #b2c2d3; font-size: .81rem }
+.metrics dd { font-size: 1.2rem; margin: 5px 0 0; font-variant-numeric: tabular-nums }
+.playback { display: flex; flex-wrap: wrap; align-items: center; gap: 10px }
+.playback input { flex: 1 1 175px }
+output { min-width: 135px; font-variant-numeric: tabular-nums }
+canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 14px 0 0; font-size: .85rem }
+.call { color: #63deae } .flip { color: #f9c87b } .put { color: #ff9f9a }
+#status { min-height: 1.4em } #error { color: #ffadab }
+@media(max-width: 540px) { body { padding: 13px } section { padding: 10px } }
+</style>
+</head>
+<body>
+<header><h1>GEX Replay</h1><p>Press Play or drag the timeline to see how price and gamma levels evolve. The built-in session uses synthetic data.</p></header>
+<div class="toolbar">
+  <label>Session<select id="session" aria-label="Session"></select></label>
+  <label>Replay clock<select id="clock"><option value="observed">Observed</option><option value="history">Historical estimate</option></select></label>
+  <label id="lag-label" hidden>Lag (minutes)<input id="lag" type="number" min="0" max="1440" value="15"></label>
+  <label class="check"><input type="checkbox" id="freeze">Freeze levels before open</label>
+  <label class="file">Import capture JSON<input id="capture" type="file" accept=".json,application/json" multiple></label>
+  <label class="file">Import price CSV<input id="bars" type="file" accept=".csv,text/csv"></label>
+</div>
+<p id="error" role="alert"></p>
+<p id="status" role="status"></p>
+<section>
+  <div class="playback">
+    <button id="prev" aria-label="Previous timestamp">←</button>
+    <button id="play">Play</button>
+    <button id="next" aria-label="Next timestamp">→</button>
+    <input id="scrub" aria-label="Replay timestamp" type="range" min="0" max="0" value="0">
+    <output id="time" for="scrub"></output>
+  </div>
+  <dl class="metrics" id="metrics"></dl>
+  <canvas id="chart" role="img" aria-label="Point-in-time price and gamma exposure chart"></canvas>
+  <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">HVL / flip</span><span class="put">Put wall</span><span>Net GEX</span></div>
+</section>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const zone = "America/New_York";
+const dateFormat = new Intl.DateTimeFormat("en-CA", {timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit"});
+const timeFormat = new Intl.DateTimeFormat("en-GB", {timeZone: zone, hour: "2-digit", minute: "2-digit", second: "2-digit"});
+const number = new Intl.NumberFormat("en-US", {maximumFractionDigits: 2});
+const compact = new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 2});
+const fields = {callWall: ["Call wall", "#63deae"], flip: ["HVL / flip", "#f9c87b"], putWall: ["Put wall", "#ff9f9a"]};
+const sessions = new Map();
+const barsBySession = new Map();
+let cursor = 0;
+let timer;
+
+function parseTime(value) {
+  const timestamp = typeof value === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? Date.parse(value) : NaN;
+  if (!Number.isFinite(timestamp)) throw new Error("Use ISO timestamps with a UTC offset.");
+  return timestamp;
+}
+
+function sessionDate(timestamp) {
+  const parts = Object.fromEntries(dateFormat.formatToParts(timestamp).map(part => [part.type, part.value]));
+  return [parts.year, parts.month, parts.day].join("-");
+}
+
+function importCapture(capture) {
+  if (capture.version !== 1 || !Array.isArray(capture.snapshots) || !capture.snapshots.length) {
+    throw new Error("The capture has no version 1 snapshots.");
+  }
+  const rows = capture.snapshots.map(row => {
+    const snapshotAt = parseTime(row.snapshotAt);
+    const observedAt = parseTime(row.observedAt);
+    if (snapshotAt > observedAt || sessionDate(snapshotAt) !== capture.date ||
+        typeof row.symbol !== "string" || typeof row.expiry !== "string") {
+      throw new Error("Invalid snapshot date, availability time, or instrument.");
+    }
+    for (const field of ["spot", "netGex", ...Object.keys(fields)]) {
+      if (row[field] != null && !Number.isFinite(row[field])) throw new Error("Invalid numeric field: " + field);
+    }
+    return {...row, snapshotAt, observedAt};
+  });
+  let lastKey;
+  for (const row of rows) {
+    lastKey = [capture.source, capture.date, row.symbol, row.expiry].join(" • ");
+    if (!sessions.has(lastKey)) sessions.set(lastKey, {date: capture.date, source: capture.source, rows: new Map()});
+    const session = sessions.get(lastKey);
+    const key = [row.expiration, row.snapshotAt].join(":");
+    const prior = session.rows.get(key);
+    if (!prior || row.observedAt < prior.observedAt) session.rows.set(key, row);
+  }
+  return lastKey;
+}
+
+function parseBars(text, date) {
+  const [header, ...rows] = text.trim().split(/\r?\n/);
+  if (header.toLowerCase().replace(/\s/g, "") !== "timestamp,open,high,low,close") {
+    throw new Error("CSV columns must be timestamp,open,high,low,close.");
+  }
+  const bars = new Map();
+  for (const line of rows.filter(line => line.trim())) {
+    const columns = line.split(",").map(value => value.trim());
+    const at = parseTime(columns[0]);
+    if (sessionDate(at) !== date) continue;
+    const [open, high, low, close] = columns.slice(1).map(Number);
+    if (columns.length !== 5 || columns.some(value => !value) ||
+        ![open, high, low, close].every(Number.isFinite) ||
+        high < Math.max(open, close) || low > Math.min(open, close)) {
+      throw new Error("Invalid OHLC values in the price CSV.");
+    }
+    bars.set(at, {at, open, high, low, close});
+  }
+  if (!bars.size) throw new Error("No price bars match the selected session date.");
+  return [...bars.values()].sort((a, b) => a.at - b.at);
+}
+
+function selection() {
+  const session = sessions.get($("session").value);
+  const historical = $("clock").value === "history";
+  const lag = Math.min(1440, Math.max(0, Number($("lag").value) || 0));
+  const rows = [...session.rows.values()].map(row => ({
+    ...row, at: historical ? row.snapshotAt + lag * 60000 : row.observedAt,
+  })).filter(row => sessionDate(row.at) === session.date)
+    .sort((a, b) => a.at - b.at || a.snapshotAt - b.snapshotAt);
+  const bars = barsBySession.get($("session").value) ?? [];
+  const times = [...new Set([...rows.map(row => row.at), ...bars.map(bar => bar.at)])].sort((a, b) => a - b);
+  return {session, historical, rows, bars, times};
+}
+
+function metric(label, value) {
+  const item = document.createElement("div");
+  const name = document.createElement("dt");
+  const reading = document.createElement("dd");
+  name.textContent = label;
+  reading.textContent = value ?? "—";
+  item.append(name, reading);
+  return item;
+}
+
+function render() {
+  const {session, historical, rows, bars, times} = selection();
+  cursor = Math.max(0, Math.min(cursor, times.length - 1));
+  const current = times[cursor];
+  const visible = rows.filter(row => row.at <= current);
+  const last = visible.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
+  const mapRows = $("freeze").checked ? visible.filter(row => timeFormat.format(row.at) < "09:30:00") : visible;
+  const map = mapRows.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
+  $("scrub").max = Math.max(0, times.length - 1);
+  $("scrub").value = cursor;
+  $("prev").disabled = !cursor;
+  $("next").disabled = cursor >= times.length - 1;
+  $("play").disabled = times.length < 2;
+  $("scrub").disabled = times.length < 2;
+  $("lag-label").style.display = historical ? "grid" : "none";
+  $("time").textContent = current === undefined ? "No replay times" : timeFormat.format(current) + " ET";
+  $("status").textContent = [
+    session.source === "Synthetic demo" ? "Synthetic demo data." : "",
+    historical ? "Historical estimate. Availability is assumed." : "Observed availability.",
+    !rows.length ? "No gamma snapshots were available on this session date under the selected clock." : "",
+    $("freeze").checked && !map ? "No eligible premarket map." : "",
+  ].filter(Boolean).join(" ");
+  $("metrics").replaceChildren(
+    metric("Vendor spot", last?.spot == null ? null : number.format(last.spot)),
+    metric("Net GEX", last?.netGex == null ? null : compact.format(last.netGex)),
+    ...Object.entries(fields).map(([field, [label]]) => metric(label, map?.[field] == null ? null : number.format(map[field]))),
+    metric("Map snapshot · ET", map ? timeFormat.format(map.snapshotAt) : null),
+    metric("Available at · ET", map ? timeFormat.format(map.at) : null),
+  );
+  $("price-legend").textContent = bars.length ? "Imported price bars" : "Vendor sampled spot";
+  draw(current, times[0], visible, bars.filter(bar => bar.at <= current), map);
+}
+
+function draw(current, start, rows, bars, map) {
+  const canvas = $("chart");
+  const {width, height} = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = width * scale;
+  canvas.height = height * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(scale, scale);
+  ctx.font = "12px system-ui";
+  ctx.fillStyle = "#101925";
+  ctx.fillRect(0, 0, width, height);
+  const left = 64, right = width - 16, top = 22, base = height - 110;
+  const spot = rows.filter(row => row.spot != null);
+  const values = [...bars.flatMap(bar => [bar.low, bar.high]), ...spot.map(row => row.spot),
+    ...Object.keys(fields).map(field => map?.[field]).filter(Number.isFinite)];
+  const net = rows.filter(row => row.netGex != null);
+  const x = time => left + (right - left) * (time - start) / Math.max(60000, current - start);
+
+  function line(x1, y1, x2, y2, color, dash = []) {
+    ctx.strokeStyle = color;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  if (!values.length) {
+    ctx.fillStyle = "#b2c2d3";
+    ctx.fillText("No eligible price or gamma levels yet.", 18, 34);
+  } else {
+    const min = Math.min(...values), max = Math.max(...values);
+    const pad = Math.max((max - min) * .08, .01);
+    const low = min - pad, high = max + pad;
+    const y = value => base - (value - low) * (base - top) / (high - low);
+    for (let i = 0; i <= 4; i++) {
+      const value = low + (high - low) * i / 4;
+      ctx.fillStyle = "#b2c2d3";
+      ctx.fillText(number.format(value), 5, y(value) + 4, 55);
+      line(left, y(value), right, y(value), "#25374c");
+    }
+    for (const [key, [, color]] of Object.entries(fields)) {
+      if (map?.[key] != null) line(x(map.at), y(map[key]), right, y(map[key]), color, [5, 5]);
+    }
+    if (bars.length) {
+      const bodyWidth = Math.min(8, Math.max(2, (right - left) / bars.length * .6));
+      for (const bar of bars) {
+        const color = bar.close >= bar.open ? "#63deae" : "#ff9f9a";
+        line(x(bar.at), y(bar.high), x(bar.at), y(bar.low), color);
+        ctx.fillStyle = color;
+        ctx.fillRect(x(bar.at) - bodyWidth / 2, Math.min(y(bar.open), y(bar.close)), bodyWidth, Math.max(1, Math.abs(y(bar.close) - y(bar.open))));
+      }
+    } else {
+      for (const [i, point] of spot.entries()) {
+        const previous = spot[i - 1];
+        if (previous && point.at > previous.at && point.at - previous.at <= 30 * 60000) {
+          line(x(previous.at), y(previous.spot), x(point.at), y(point.spot), "#9aceff");
+        }
+        ctx.fillStyle = "#9aceff";
+        ctx.fillRect(x(point.at) - 1, y(point.spot) - 1, 3, 3);
+      }
+    }
+  }
+  const zero = height - 62;
+  line(left, zero, right, zero, "#506478");
+  ctx.fillStyle = "#b2c2d3";
+  ctx.fillText("Net GEX", 5, zero + 4);
+  if (net.length) {
+    const max = Math.max(1, ...net.map(row => Math.abs(row.netGex)));
+    for (const point of net) {
+      line(x(point.at), zero, x(point.at), zero - 28 * point.netGex / max, point.netGex >= 0 ? "#63deae" : "#ff9f9a");
+    }
+  }
+  if (Number.isFinite(current)) {
+    ctx.fillStyle = "#b2c2d3";
+    const labels = current - start >= 30 * 60000 ? 5 : current > start ? 2 : 1;
+    for (let i = 0; i < labels; i++) {
+      const t = start + (current - start) * i / Math.max(1, labels - 1);
+      ctx.fillText(timeFormat.format(t).slice(0, 5), Math.min(right - 28, x(t)), height - 12);
+    }
+  }
+}
+
+function refreshSessions(key) {
+  $("session").replaceChildren(...[...sessions.keys()].map(name => new Option(name, name)));
+  $("session").value = key;
+  cursor = 0;
+  render();
+}
+
+function demo() {
+  const date = "2026-11-19";
+  const start = Date.parse(date + "T09:12:00-05:00");
+  const snapshots = [];
+  const bars = [];
+  const price = i => 521 + 0.083 * i + 2.3 * Math.sin(i / 7) + 0.43 * Math.sin(i * 2.1);
+  for (let i = 0; i < 65; i++) {
+    const at = start + i * 120000;
+    const open = price(i - 1), close = price(i);
+    bars.push({at, open, close, high: Math.max(open, close) + .3, low: Math.min(open, close) - .34});
+    if (i % 5 === 0) snapshots.push({
+      symbol: "QQQ", expiry: "ALL", expiration: date, snapshotAt: new Date(at).toISOString(),
+      observedAt: new Date(at + 120000).toISOString(), spot: close,
+      netGex: Math.round(85e6 * Math.cos(i / 10)), callWall: i < 40 ? 528 : 530, flip: i < 35 ? 523 : 526, putWall: 516,
+    });
+  }
+  const key = importCapture({version: 1, source: "Synthetic demo", date, snapshots});
+  barsBySession.set(key, bars);
+  refreshSessions(key);
+  cursor = 15;
+  render();
+}
+
+function stop() {
+  clearInterval(timer);
+  timer = undefined;
+  $("play").textContent = "Play";
+}
+
+$("play").onclick = () => {
+  if (timer) return stop();
+  if (cursor === selection().times.length - 1) cursor = 0;
+  render();
+  $("play").textContent = "Pause";
+  timer = setInterval(() => {
+    if (cursor >= selection().times.length - 1) return stop();
+    cursor++;
+    render();
+  }, 550);
+};
+$("prev").onclick = () => { stop(); cursor--; render(); };
+$("next").onclick = () => { stop(); cursor++; render(); };
+$("scrub").oninput = event => { stop(); cursor = Number(event.target.value); render(); };
+for (const id of ["session", "clock", "lag"]) $(id).onchange = () => { stop(); cursor = 0; render(); };
+$("freeze").onchange = render;
+
+$("capture").onchange = async event => {
+  stop();
+  $("error").textContent = "";
+  let key = $("session").value;
+  for (const file of event.target.files) {
+    try { key = importCapture(JSON.parse(await file.text())); }
+    catch (error) { $("error").textContent += file.name + " — " + error.message + " "; }
+  }
+  refreshSessions(key);
+  event.target.value = "";
+};
+
+$("bars").onchange = async event => {
+  stop();
+  $("error").textContent = "";
+  const key = $("session").value;
+  try {
+    const file = event.target.files[0];
+    if (file) barsBySession.set(key, parseBars(await file.text(), sessions.get(key).date));
+    render();
+  } catch (error) { $("error").textContent = error.message; }
+  event.target.value = "";
+};
+
+demo();
+window.addEventListener("resize", render);
+</script>
+</body>
+</html>
