@@ -42,6 +42,17 @@ code { overflow-wrap: anywhere }
 .call { color: #63deae } .flip { color: #f9c87b } .put { color: #ff9f9a }
 #status { min-height: 1.4em } #error { color: #ffadab }
 @media(max-width: 540px) { body { padding: 13px } section { padding: 10px } }
+.practice { max-width: 860px; }
+.practice h2, .practice h3 { margin: 8px 0; }
+.practice p { max-width: 74ch; }
+.practice .practice-progress { color: #86d9bc; font-size: .9rem; }
+.practice #practice-question { color: #e4edf7; font-weight: 600; }
+.practice-choices { display: grid; gap: 8px; margin: 12px 0; }
+.practice-choices button { text-align: left; }
+.practice-choices button:hover:not(:disabled) { background: #27415d; }
+.practice-feedback:not(:empty) { border-left: 3px solid #86d9bc; padding-left: 12px; margin: 14px 0; }
+.practice .practice-nav { display: flex; gap: 8px; margin-top: 14px; }
+.practice a { color: #9aceff; }
 </style>
 </head>
 <body>
@@ -83,6 +94,25 @@ code { overflow-wrap: anywhere }
     <summary>Importing market data</summary>
     <p>For the strike charts, import capture JSON with timestamped option chains. Each snapshot needs <code>symbol, expiry, expiration, snapshotAt, observedAt, spot, contracts</code>. Each contract needs <code>strike, expirationAt, right, iv, gamma, openInterest</code>. Use <code>C</code> or <code>P</code>, decimal IV, and offset-aware timestamps including the contract’s actual AM or PM settlement time. Use null for unknown observed time and select Historical estimate. The browser reads these files locally.</p>
     <p>Price CSV accepts <code>timestamp,open,high,low,close</code> with bar-close timestamps, or a Sierra Chart one-minute Write Bar Data to File export with UTC enabled and YYYY/MM/DD selected. For SPX options with ES bars, select ES (SPX basis). The chart maps each SPX level using the latest eligible ES close at or before the SPX quote, within two minutes.</p>
+  </details>
+</section>
+<section class="practice" aria-labelledby="practice-heading">
+  <h2 id="practice-heading">Practice reading GEX</h2>
+  <p>Pick what you’d watch next. These hypothetical scenarios use modeled gamma to frame observations you can test in replay.</p>
+  <p id="practice-progress" class="practice-progress"></p>
+  <h3 id="practice-title" tabindex="-1"></h3>
+  <p id="practice-situation"></p>
+  <p id="practice-question"></p>
+  <div id="practice-choices" class="practice-choices" role="group" aria-labelledby="practice-question"></div>
+  <div id="practice-feedback" class="practice-feedback" role="status" aria-atomic="true"></div>
+  <div class="practice-nav">
+    <button id="practice-next" type="button" disabled>Next scenario</button>
+    <button id="practice-restart" type="button">Restart practice</button>
+  </div>
+  <details>
+    <summary>Research and video</summary>
+    <p><a href="https://www.youtube.com/watch?v=gsRDKji_1yU">Christopher Creamer’s video</a> frames the breakout and wall hypotheses using QQQ and NQ. The scenarios here use SPX and ES.</p>
+    <p><a href="https://ssrn.com/abstract=4692190">Dim, Eraker, and Vilkov</a> study dealer inventory gamma and intraday reversals. <a href="https://cdn.cboe.com/resources/education/research_publications/gammasqueezes.pdf">Amaya and coauthors</a> estimate the size of gamma’s volatility effect using participant-level trades. <a href="https://ssrn.com/abstract=7131778">Chilingarian</a> compares ways to estimate dealer gamma and define the flip.</p>
   </details>
 </section>
 <script>
@@ -727,6 +757,139 @@ function describeAnalytics(analysis, row, symbol) {
 }
 
 demo();
+
+const practiceScenarios = [
+  {
+    title: "Breakout in positive gamma",
+    situation: "ES pushes above its opening range. The modeled net gamma profile is strongly positive around the current price.",
+    question: "What would you watch next?",
+    choices: [
+      ["Fade the breakout as soon as it happens.", "Positive modeled gamma gives you a reason to watch for a fade. Price still has to show rejection."],
+      ["Watch whether ES holds above the range or falls back inside.", "A quick return inside supports the failed-breakout hypothesis. A retest that holds above the range weakens it."],
+      ["Look up the largest put open-interest strike and use it as a target.", "Open interest shows where contracts are concentrated. It gives little information about whether this breakout will hold."],
+    ],
+    answer: 1,
+    replay: "Pause just after the break and make your call before stepping forward. Then check the first retest.",
+  },
+  {
+    title: "Breakdown in negative gamma",
+    situation: "ES breaks below the opening range. The modeled profile is strongly negative near spot, and the first bounce is still below the range.",
+    question: "What would support continuation?",
+    choices: [
+      ["The bounce fails and ES makes a fresh low.", "A failed retest followed by a fresh low supports downside continuation. A sustained reclaim of the range weakens it."],
+      ["Net GEX is negative, so the next move has to be down.", "Negative gamma can amplify a move in either direction. Here the price action supplies the direction."],
+      ["A large opposing bar in the open-interest panel guarantees a reversal.", "Open interest counts contracts. ES can trade through a large concentration, so wait to see how the retest behaves."],
+    ],
+    answer: 0,
+    replay: "Step through the bounce. Record whether it fails below the range or reclaims it.",
+  },
+  {
+    title: "A call wall meets a round number",
+    situation: "ES approaches a call wall for the first time. The same level is a round number and close to yesterday’s high.",
+    question: "How would you interpret a reversal there?",
+    choices: [
+      ["Credit the wall because it was visible before the move.", "Knowing the wall was visible rules out hindsight in choosing it. The round number and prior high are still competing explanations."],
+      ["Expect the level to reject every approach.", "The first approach and later retests are different events. Track clean trades through the level as well as rejections."],
+      ["Log the reaction and flag all three levels as possible explanations.", "A reversal is consistent with the wall hypothesis. A clean break and hold weakens it, and the overlapping levels make attribution uncertain either way."],
+    ],
+    answer: 2,
+    replay: "Mark the level before price arrives and record the first touch. Compare similar approaches to round numbers without a gamma wall.",
+  },
+  {
+    title: "Price straddles the gamma flip",
+    situation: "ES crosses the shaded flip band twice in a few bars. The profile sits close to zero on both sides of the band.",
+    question: "How much weight should the crossing get?",
+    choices: [
+      ["Give it little weight and watch for a move into a region with stronger modeled gamma.", "Near the root, the estimated exposure is small and the sign can change with small input changes. Check whether the profile stays on the same side of zero across nearby prices and successive snapshots."],
+      ["Switch your outlook every time price crosses the line.", "The line marks a zero of a model. A small crossing may change the sign without materially changing the hedge sensitivity."],
+      ["Use the shaded band as a statistical confidence interval.", "The band brackets a numerical crossing. Its width comes from the model’s price grid."],
+    ],
+    answer: 0,
+    replay: "Inspect the profile near the blue price line. Compare the shape before and after the next available options snapshot.",
+  },
+  {
+    title: "0DTE and all expiries disagree",
+    situation: "The 0DTE profile is negative near spot, but the all-expiry profile is positive.",
+    question: "How would you turn that into a useful observation?",
+    choices: [
+      ["Use whichever view fits the candles so far.", "That lets the outcome pick your signal. Record both readings before advancing the replay."],
+      ["Record both signs and decide which expiry view you’re testing before stepping ahead.", "The filters cover different contracts. Record their signs and magnitudes separately, then compare each with subsequent price behavior across sessions."],
+      ["Assume the 0DTE view must dominate every intraday move.", "Short-dated gamma can be sensitive to price and time. Open-interest-based GEX can miss same-day changes in dealer inventory, and other expiries can offset it."],
+    ],
+    answer: 1,
+    replay: "Toggle 0DTE and All expiries at the same replay timestamp. Write down both readings before playing the next bars.",
+  },
+];
+
+let practiceIndex = 0;
+let practiceCorrect = 0;
+let practiceAttempts = 0;
+
+function renderPractice() {
+  const scenario = practiceScenarios[practiceIndex];
+  $("practice-progress").textContent = `Scenario ${practiceIndex + 1} of ${practiceScenarios.length}`;
+  $("practice-title").textContent = scenario.title;
+  $("practice-situation").textContent = scenario.situation;
+  $("practice-question").textContent = scenario.question;
+  $("practice-feedback").replaceChildren();
+  $("practice-next").disabled = true;
+  $("practice-next").textContent = practiceIndex === practiceScenarios.length - 1 ? "See results" : "Next scenario";
+  practiceAttempts = 0;
+
+  const choices = scenario.choices.map(([label, explanation], i) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.onclick = () => {
+      const correct = i === scenario.answer;
+      const firstAttempt = practiceAttempts++ === 0;
+      const message = document.createElement("p");
+      message.textContent = (correct ? "Best read. " : "Try again. ") + explanation;
+      $("practice-feedback").replaceChildren(message);
+      if (!correct) {
+        button.disabled = true;
+        const nextChoice = choices.find(choice => !choice.disabled);
+        nextChoice?.focus();
+        return;
+      }
+      practiceCorrect += Number(firstAttempt);
+      const replayNote = document.createElement("p");
+      replayNote.textContent = "In the replay, " + scenario.replay[0].toLowerCase() + scenario.replay.slice(1);
+      $("practice-feedback").append(replayNote);
+      choices.forEach(choice => { choice.disabled = true; });
+      $("practice-next").disabled = false;
+      $("practice-next").focus();
+    };
+    return button;
+  });
+  $("practice-choices").replaceChildren(...choices);
+}
+
+$("practice-next").onclick = () => {
+  if (++practiceIndex < practiceScenarios.length) {
+    renderPractice();
+    $("practice-title").focus();
+    return;
+  }
+  $("practice-progress").textContent = "Practice complete";
+  $("practice-title").textContent = `${practiceCorrect} of ${practiceScenarios.length} on the first try`;
+  $("practice-situation").textContent = "In a real replay, write down what would confirm or invalidate your read before you reveal the next bars.";
+  $("practice-question").textContent = "";
+  $("practice-choices").replaceChildren();
+  $("practice-feedback").replaceChildren();
+  $("practice-next").disabled = true;
+  $("practice-restart").focus();
+};
+
+$("practice-restart").onclick = () => {
+  practiceIndex = 0;
+  practiceCorrect = 0;
+  renderPractice();
+  $("practice-title").focus();
+};
+
+renderPractice();
+
 window.addEventListener("resize", render);
 </script>
 </body>
