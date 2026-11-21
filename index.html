@@ -53,6 +53,16 @@ code { overflow-wrap: anywhere }
 .practice-feedback:not(:empty) { border-left: 3px solid #86d9bc; padding-left: 12px; margin: 14px 0; }
 .practice .practice-nav { display: flex; gap: 8px; margin-top: 14px; }
 .practice a { color: #9aceff; }
+.gex-guide h2, .gex-guide h3 { margin: 8px 0; }
+.gex-guide > p { max-width: 90ch; }
+.gex-guide a { color: #9aceff; }
+.guide-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px; margin: 14px 0 18px; }
+.guide-grid article { background: #101925; border-radius: 8px; padding: 12px 14px; }
+.guide-grid h3 { font-size: 1rem; margin: 0 0 6px; }
+.guide-grid p:last-child { margin-bottom: 0; }
+.guide-steps { margin: 8px 0; padding-left: 22px; }
+.guide-steps li { margin: 8px 0; padding-left: 3px; color: #b2c2d3; }
+.guide-steps strong { color: #e4edf7; }
 </style>
 </head>
 <body>
@@ -95,6 +105,35 @@ code { overflow-wrap: anywhere }
     <p>For the strike charts, import capture JSON with timestamped option chains. Each snapshot needs <code>symbol, expiry, expiration, snapshotAt, observedAt, spot, contracts</code>. Each contract needs <code>strike, expirationAt, right, iv, gamma, openInterest</code>. Use <code>C</code> or <code>P</code>, decimal IV, and offset-aware timestamps including the contract’s actual AM or PM settlement time. Use null for unknown observed time and select Historical estimate. The browser reads these files locally.</p>
     <p>Price CSV accepts <code>timestamp,open,high,low,close</code> with bar-close timestamps, or a Sierra Chart one-minute Write Bar Data to File export with UTC enabled and YYYY/MM/DD selected. For SPX options with ES bars, select ES (SPX basis). The chart maps each SPX level using the latest eligible ES close at or before the SPX quote, within two minutes.</p>
   </details>
+</section>
+<section class="gex-guide" aria-labelledby="gex-guide-heading">
+  <h2 id="gex-guide-heading">How to read GEX in replay</h2>
+  <p>Gamma exposure estimates how quickly an options book’s delta, or sensitivity to price, changes as the underlying moves. A dealer who hedges that delta may have to buy or sell as price moves. The dashboard estimates exposure from open interest and option gamma, counting calls as positive and puts as negative. Open interest counts outstanding contracts and tells you little about which side dealers hold, so treat the sign as a hypothesis about hedging pressure.</p>
+  <div class="guide-grid">
+    <article>
+      <h3>Positive and negative gamma</h3>
+      <p>If dealers are long gamma and rebalance their hedges, they tend to sell into rallies and buy into dips. That can dampen a move. If they’re short gamma, hedging can go with the move in either direction. After a breakout, a quick return into the range fits the first hypothesis. A retest that holds and extends fits the second. Either pattern can also come from other order flow.</p>
+    </article>
+    <article>
+      <h3 class="flip">Gamma flip and shaded zone</h3>
+      <p>The Gamma Profile recalculates net GEX at different hypothetical prices from the same snapshot. The flip marks the modeled zero crossing nearest spot, and the shaded zone shows the price steps that bracket it. Check which side is positive on the profile. Repeated crossings suggest price is still moving around the boundary. A move that holds away from the zone gives you a clearer case to study. A vendor HVL is a separately supplied level.</p>
+    </article>
+    <article>
+      <h3><span class="call">Call wall</span> and <span class="put">put wall</span></h3>
+      <p>With chain data, these mark the strikes with the largest modeled call and put exposures for the selected expiries. At a test, watch whether price rejects, stalls, or trades through and holds on the retest. Many walls are near round numbers, so compare their reaction rates against similar round levels elsewhere before attributing a reaction to GEX.</p>
+    </article>
+    <article>
+      <h3>Reading across the panels</h3>
+      <p>Trace the current price horizontally. Net GEX by strike shows where call and put exposures offset. Call / Put GEX shows each side, and Open Interest shows contract counts. The Gamma Profile shows total modeled exposure if the underlying moves to each price. Compare All expiries with 0DTE at the same replay time. A disagreement shows that the modeled regime depends on which contracts you include.</p>
+    </article>
+  </div>
+  <h3>Turn a chart read into a test</h3>
+  <ol class="guide-steps">
+    <li><strong>Pause before the outcome.</strong> Check <em>Map snapshot</em> for when the quote was taken and <em>Available at</em> for when the replay allows you to use it. Observed uses recorded availability. Historical estimate applies an assumed lag. With <em>ES (SPX basis)</em>, the displayed levels come from SPX options mapped onto the ES price scale.</li>
+    <li><strong>Write down a measurable hypothesis.</strong> For example, after the first close above the call wall, does ES close back below it within the next five one-minute bars? Record the level at the time of the test so later snapshots don’t move the goalposts.</li>
+    <li><strong>Count every eligible test.</strong> Compare with similar round levels matched by time of day, recent volatility, and distance from price. Over many sessions, check whether rejection rates or forward volatility differ. The synthetic session is useful for practicing these steps. Use real captures for evidence.</li>
+  </ol>
+  <p>Barbon and Buraschi found evidence linking estimated gamma and liquidity to intraday reversals or continuation in equities. Cboe’s SPX 0DTE analysis found largely balanced customer flow in its sample. Those findings motivate testing the read session by session. <a href="https://www.abarbon.com/papers/gamma-fragility">Gamma Fragility</a> · <a href="https://www.cboe.com/insights/posts/0-dt-es-decoded-positioning-trends-and-market-impact">Cboe’s 0DTE analysis</a></p>
 </section>
 <section class="practice" aria-labelledby="practice-heading">
   <h2 id="practice-heading">Practice reading GEX</h2>
