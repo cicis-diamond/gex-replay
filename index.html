@@ -27,16 +27,12 @@ button:disabled { opacity: .5; cursor: default }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 10px }
 .playback input { flex: 1 1 175px }
 output { min-width: 135px; font-variant-numeric: tabular-nums }
-h2 { margin: 0 0 4px; font-size: 1.1rem }
-.chart-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; margin-top: 14px }
-.chart-grid > div { min-width: 0 }
-.chart-grid h3 { margin: 0 0 6px; font-size: .94rem }
-.chart-grid canvas { height: 250px }
-#profile { height: 320px; margin-top: 16px }
+.chart-scroll { overflow-x: auto; border-radius: 8px; margin-top: 10px }
+.chart-scroll:focus-visible { outline: 2px solid #9aceff }
+canvas { display: block; width: 100%; min-width: 930px; height: clamp(480px,59vh,680px) }
+.chart-settings { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 16px }
 details { margin-top: 12px; color: #b2c2d3 }
 code { overflow-wrap: anywhere }
-@media(max-width: 910px) { .chart-grid { grid-template-columns: repeat(auto-fit,minmax(240px,1fr)) } }
-canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 14px 0 0; font-size: .85rem }
 .call { color: #63deae } .flip { color: #f9c87b } .put { color: #ff9f9a }
 #status { min-height: 1.4em } #error { color: #ffadab }
@@ -65,21 +61,15 @@ canvas { display: block; width: 100%; height: clamp(310px,50vw,500px) }
     <output id="time" for="scrub"></output>
   </div>
   <dl class="metrics" id="metrics"></dl>
-  <canvas id="chart" role="img" aria-label="Point-in-time price and gamma exposure chart"></canvas>
-  <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Net GEX</span></div>
-</section>
-<section id="analytics">
-  <h2>Options snapshot</h2>
-  <p id="analytics-status" role="status"></p>
-  <div class="toolbar">
+  <div class="chart-settings">
     <label>Expiration focus<select id="expiry-focus"><option value="all">All expiries</option><option value="same">0DTE</option><option value="largest">Largest open interest</option><option value="next">Nearest expiry</option></select></label>
+    <label>Price range<select id="price-range"><option value="session">Replay range</option><option value="full">Include full gamma profile</option></select></label>
+    <p id="analytics-status" role="status"></p>
   </div>
-  <div class="chart-grid">
-    <div><h3>Net GEX by strike</h3><canvas id="strike-net" role="img" aria-label="Net gamma exposure by strike"></canvas></div>
-    <div><h3>Call vs. put GEX</h3><canvas id="strike-sides" role="img" aria-label="Call and put gamma exposure by strike"></canvas></div>
-    <div><h3>Open interest by strike</h3><canvas id="strike-oi" role="img" aria-label="Call and put open interest by strike"></canvas></div>
+  <div class="chart-scroll" role="region" aria-label="Aligned replay charts, scroll horizontally on narrow screens" tabindex="0">
+    <canvas id="chart" role="img" aria-label="Price candles alongside horizontal strike charts for net gamma exposure, call and put gamma exposure, open interest, and the repriced gamma profile on a shared price axis"></canvas>
   </div>
-  <canvas id="profile" role="img" aria-label="Repriced net gamma profile with positive and negative regions and zero crossings"></canvas>
+  <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Blue dashed line: current price</span><span>Calls right · puts left</span></div>
   <p id="profile-status"></p>
   <details>
     <summary>Importing market data</summary>
@@ -243,11 +233,11 @@ function render() {
   );
   $("price-legend").textContent = displayBars.length ? (futures ? "ES price bars" : session.symbol + " price bars") : (futures ? "ES price bars unavailable" : "Vendor sampled spot");
   draw(current, times[0], visible.map(row => ({...row, netGex: analyze(row,true)?.netGex ?? row.netGex})),
-    displayBars.filter(bar => bar.at <= current), mapped, futures);
-  drawAnalytics(mapAnalysis, map, session.symbol);
+    displayBars.filter(bar => bar.at <= current), mapped, futures, mapped ? mapAnalysis : null);
+  describeAnalytics(mapAnalysis, map, session.symbol);
 }
 
-function draw(current, start, rows, bars, map, futures) {
+function draw(current, start, rows, bars, map, futures, analysis) {
   const canvas = $("chart");
   const {width, height} = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -258,12 +248,12 @@ function draw(current, start, rows, bars, map, futures) {
   ctx.font = "12px system-ui";
   ctx.fillStyle = "#101925";
   ctx.fillRect(0, 0, width, height);
-  const left = 64, right = width - 16, top = 22, base = height - 110;
-  const spot = futures ? [] : rows.filter(row => row.spot != null);
-  const values = [...bars.flatMap(bar => [bar.low, bar.high]), ...spot.map(row => row.spot),
-    ...Object.keys(fields).map(field => map?.[field]).filter(Number.isFinite), ...(map?.flipBand ?? [])];
-  const net = rows.filter(row => row.netGex != null);
-  const x = time => left + (right - left) * (time - start) / Math.max(60000, current - start);
+
+  const left = 69, edge = width - 12, top = 46, base = height - 103;
+  const right = left + (edge - left) * .44;
+  const panelWidth = (edge - right) / 4;
+  const panelTitles = ["Net GEX", "Call / Put GEX", "Open Interest", "Gamma Profile"];
+  const priceLabel = futures ? "ES" : sessions.get($("session").value).symbol;
 
   function line(x1, y1, x2, y2, color, dash = []) {
     ctx.strokeStyle = color;
@@ -274,31 +264,60 @@ function draw(current, start, rows, bars, map, futures) {
     ctx.stroke();
     ctx.setLineDash([]);
   }
+  function label(text, x, y, maxWidth) {
+    ctx.fillStyle = "#b2c2d3";
+    if (maxWidth) ctx.fillText(text, x, y, maxWidth);
+    else ctx.fillText(text, x, y);
+  }
+
+  label(priceLabel + " price", left, 23);
+  panelTitles.forEach((title, i) => {
+    const boundary = right + i * panelWidth;
+    line(boundary, 9, boundary, base + 34, "#324258");
+    label(title, boundary + 9, 18, panelWidth - 17);
+    label(i === 2 ? "Contracts" : "$ / 1% move", boundary + 9, 34, panelWidth - 17);
+  });
+
+  const spot = futures ? [] : rows.filter(row => row.spot != null);
+  const values = [...bars.flatMap(bar => [bar.low, bar.high]), ...spot.map(row => row.spot),
+    ...Object.keys(fields).map(field => map?.[field]).filter(Number.isFinite), ...(map?.flipBand ?? [])];
+  const shift = map?.basis ?? 0;
+  const mapSpot = map?.spot == null ? null : map.spot + shift;
+  if ($("price-range").value === "full" && analysis && mapSpot != null) {
+    values.push(analysis.profile[0].price + shift, analysis.profile.at(-1).price + shift);
+  }
+  const net = rows.filter(row => row.netGex != null);
+  const x = time => left + 4 + (right - left - 10) * (time - start) / Math.max(60000, current - start);
 
   if (!values.length) {
-    ctx.fillStyle = "#b2c2d3";
-    ctx.fillText("No eligible price or gamma levels yet.", 18, 34);
+    label("No eligible price or gamma levels yet.", left, top + 22);
   } else {
     const min = Math.min(...values), max = Math.max(...values);
-    const pad = Math.max((max - min) * .08, .01);
+    const pad = Math.max((max - min) * .06, .01);
     const low = min - pad, high = max + pad;
     const y = value => base - (value - low) * (base - top) / (high - low);
-    for (let i = 0; i <= 4; i++) {
-      const value = low + (high - low) * i / 4;
-      ctx.fillStyle = "#b2c2d3";
-      ctx.fillText(number.format(value), 5, y(value) + 4, 55);
-      line(left, y(value), right, y(value), "#25374c");
+    if (analysis && mapSpot != null) {
+      drawStrikePanels(ctx, analysis, {right, panelWidth, top, base, low, high, y, shift, line, label});
+    } else {
+      label("No aligned option chain at this timestamp.", right + 9, top + 20);
     }
-    if (map?.flipBand && map.flipBand.every(v => v >= low && v <= high)) {
+    for (let i = 0; i <= 6; i++) {
+      const value = low + (high - low) * i / 6;
+      ctx.globalAlpha = .58;
+      line(left, y(value), edge, y(value), "#324258");
+      ctx.globalAlpha = 1;
+      label(number.format(value), 6, y(value) + 4, left - 12);
+    }
+    if (map?.flipBand) {
       const [lower, upper] = map.flipBand;
-      ctx.fillStyle = "#f9c87b29";
-      ctx.fillRect(x(map.at), y(upper), Math.max(1, x(current) - x(map.at)), y(lower) - y(upper));
+      ctx.fillStyle = "#f9c87b25";
+      ctx.fillRect(x(map.at), y(upper), edge - x(map.at), y(lower) - y(upper));
     }
     for (const [key, [, color]] of Object.entries(fields)) {
-      if (map?.[key] != null) line(x(map.at), y(map[key]), right, y(map[key]), color, [5, 5]);
+      if (map?.[key] != null) line(x(map.at), y(map[key]), edge, y(map[key]), color, [5, 5]);
     }
     if (bars.length) {
-      const bodyWidth = Math.min(8, Math.max(2, (right - left) / bars.length * .6));
+      const bodyWidth = Math.min(9, Math.max(1.5, (right - left) / bars.length * .58));
       for (const bar of bars) {
         const color = bar.close >= bar.open ? "#63deae" : "#ff9f9a";
         line(x(bar.at), y(bar.high), x(bar.at), y(bar.low), color);
@@ -315,25 +334,100 @@ function draw(current, start, rows, bars, map, futures) {
         ctx.fillRect(x(point.at) - 1, y(point.spot) - 1, 3, 3);
       }
     }
+    const latestPrice = bars.at(-1)?.close ?? spot.at(-1)?.spot;
+    if (latestPrice != null) line(right, y(latestPrice), edge, y(latestPrice), "#9aceff", [3, 4]);
   }
-  const zero = height - 62;
-  line(left, zero, right, zero, "#506478");
-  ctx.fillStyle = "#b2c2d3";
-  ctx.fillText("Net GEX", 5, zero + 4);
+
+  const zero = height - 57;
+  line(left, zero, right - 6, zero, "#506478");
+  label("Net GEX", 6, zero + 4);
   if (net.length) {
     const max = Math.max(1, ...net.map(row => Math.abs(row.netGex)));
     for (const point of net) {
-      line(x(point.at), zero, x(point.at), zero - 28 * point.netGex / max, point.netGex >= 0 ? "#63deae" : "#ff9f9a");
+      line(x(point.at), zero, x(point.at), zero - 24 * point.netGex / max, point.netGex >= 0 ? "#63deae" : "#ff9f9a");
     }
   }
   if (Number.isFinite(current)) {
-    ctx.fillStyle = "#b2c2d3";
     const labels = current - start >= 30 * 60000 ? 5 : current > start ? 2 : 1;
     for (let i = 0; i < labels; i++) {
       const t = start + (current - start) * i / Math.max(1, labels - 1);
-      ctx.fillText(timeFormat.format(t).slice(0, 5), Math.min(right - 28, x(t)), height - 12);
+      label(timeFormat.format(t).slice(0, 5), Math.min(right - 35, x(t)), height - 10);
     }
   }
+}
+
+function drawStrikePanels(ctx, analysis, layout) {
+  const {right, panelWidth, top, base, low, high, y, shift, line, label} = layout;
+  const inRange = price => price + shift >= low && price + shift <= high;
+  const strikes = analysis.buckets.filter(bucket => inRange(bucket.strike));
+  const series = [
+    strikes.map(b => [b.strike, b.net]),
+    strikes.flatMap(b => [[b.strike, b.call], [b.strike, b.put]]),
+    strikes.flatMap(b => [[b.strike, b.callOi], [b.strike, b.putOi]]),
+    analysis.profile.map(point => [point.price, point.gex]),
+  ];
+  const gap = strikes.slice(1).reduce((min, row, i) =>
+    Math.min(min, y(strikes[i].strike + shift) - y(row.strike + shift)), 11);
+  const thickness = Math.max(1, Math.min(8, gap * .72));
+
+  series.forEach((data, i) => {
+    const first = right + i * panelWidth + 8;
+    const last = first + panelWidth - 16;
+    const axis = (first + last) / 2;
+    const profile = i === 3;
+    const domain = profile ? data.filter(([price]) => inRange(price)) : data;
+    const max = Math.max(1, ...domain.map(([, value]) => Math.abs(value)));
+    const x = value => axis + Math.max(-1, Math.min(1, value / max)) * (last - first) / 2;
+    line(axis, top, axis, base, "#506478");
+    if (!domain.length) {
+      label("No data in range", first, top + 19, panelWidth - 16);
+      return;
+    }
+    label(compact.format(-max), first, base + 17, panelWidth / 3);
+    label("0", axis - 3, base + 17);
+    ctx.textAlign = "right";
+    label(compact.format(max), last, base + 17, panelWidth / 3);
+    ctx.textAlign = "left";
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(first - 1, top, last - first + 2, base - top);
+    ctx.clip();
+    const color = v => v >= 0 ? "#63deae" : "#ff9f9a";
+    if (profile) {
+      const bounds = [data[0][0], ...analysis.crossings.map(root => root.price), data.at(-1)[0]];
+      for (let i = 1; i < bounds.length; i++) {
+        const midpoint = (bounds[i - 1] + bounds[i]) / 2;
+        const sample = data.reduce((a, b) => Math.abs(b[0] - midpoint) < Math.abs(a[0] - midpoint) ? b : a);
+        if (sample[1] === 0) continue;
+        ctx.fillStyle = sample[1] > 0 ? "#63deae14" : "#ff9f9a14";
+        const upper = y(bounds[i] + shift);
+        const lower = y(bounds[i - 1] + shift);
+        ctx.fillRect(first, upper, last - first, lower - upper);
+      }
+      for (let index = 1; index < data.length; index++) {
+        const [pa, a] = data[index - 1], [pb, b] = data[index];
+        const ya = y(pa + shift), yb = y(pb + shift);
+        if (a * b < 0) {
+          const crossing = ya + (yb - ya) * a / (a - b);
+          line(x(a), ya, axis, crossing, color(a));
+          line(axis, crossing, x(b), yb, color(b));
+        } else {
+          line(x(a), ya, x(b), yb, color(a || b));
+        }
+      }
+      if (analysis.maxPain != null && inRange(analysis.maxPain)) {
+        const levelY = y(analysis.maxPain + shift);
+        line(first, levelY, last, levelY, "#a8b1e8", [3, 3]);
+        label("Max pain", first + 3, Math.max(top + 12, levelY - 4), panelWidth - 19);
+      }
+    } else {
+      for (const [strike, value] of data) {
+        ctx.fillStyle = color(value);
+        ctx.fillRect(Math.min(axis, x(value)), y(strike + shift) - thickness / 2, Math.abs(x(value) - axis), thickness);
+      }
+    }
+    ctx.restore();
+  });
 }
 
 function refreshSessions(key) {
@@ -402,7 +496,7 @@ $("prev").onclick = () => { stop(); cursor--; render(); };
 $("next").onclick = () => { stop(); cursor++; render(); };
 $("scrub").oninput = event => { stop(); cursor = Number(event.target.value); render(); };
 for (const id of ["session", "clock", "lag"]) $(id).onchange = () => { stop(); cursor = 0; render(); };
-for (const id of ["freeze", "instrument", "expiry-focus"]) $(id).onchange = render;
+for (const id of ["freeze", "instrument", "expiry-focus", "price-range"]) $(id).onchange = render;
 $("session").addEventListener("change", () => {
   $("instrument").value = sessions.get($("session").value).defaultInstrument ?? "underlying";
   render();
@@ -529,13 +623,13 @@ function esMap(map, bars, symbol) {
   const bar = bars.findLast(bar => bar.at <= map.snapshotAt);
   if (!bar || map.snapshotAt - bar.at > 120000) return null;
   const basis = bar.close - map.spot;
-  const levels = {...map};
+  const levels = {...map, basis};
   for (const field of Object.keys(fields)) if (map[field] != null) levels[field] += basis;
   if (map.flipBand) levels.flipBand = map.flipBand.map(price => price + basis);
   return levels;
 }
 
-function drawAnalytics(analysis, row, symbol) {
+function describeAnalytics(analysis, row, symbol) {
   $("analytics-status").textContent = analysis
     ? symbol + " · " + timeFormat.format(row.snapshotAt) + " ET · " + number.format(analysis.contracts.length) + " contracts"
     : row?.contracts?.length ? "No contracts for the selected expiry focus." : "Import a capture with contract-level data to see these charts.";
@@ -545,95 +639,6 @@ function drawAnalytics(analysis, row, symbol) {
     "Calls contribute positive GEX and puts negative GEX. The profile reprices gamma with fixed IV, zero rates and zero dividends.",
   ] : [];
   $("profile-status").textContent = labels.filter(Boolean).join(" ");
-  for (const [id,keys,unit] of [
-    ["strike-net",["net"],"$/1% move"],
-    ["strike-sides",["call","put"],"$/1% move"],
-    ["strike-oi",["callOi","putOi"],"contracts"],
-  ]) {
-    const values = analysis?.buckets.filter(b => Math.abs(b.strike/row.spot - 1) <= .05)
-      .map(b => ({price:b.strike, values:keys.map(key => key === "putOi" ? -b[key] : b[key])}));
-    drawDistribution(id, values, row, unit);
-  }
-  drawDistribution("profile", analysis?.profile.map(p => ({price:p.price,values:[p.gex]})), row,
-    "Repriced net GEX ($/1% move)", analysis);
-}
-
-function drawDistribution(id, points, row, unit, profile) {
-  const canvas = $(id);
-  const {width,height} = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = width*dpr;
-  canvas.height = height*dpr;
-  const ctx = canvas.getContext("2d");
-  ctx.scale(dpr,dpr);
-  ctx.font = "12px system-ui";
-  ctx.fillStyle = "#101925";
-  ctx.fillRect(0,0,width,height);
-  ctx.fillStyle = "#b2c2d3";
-  ctx.fillText(unit,12,18);
-  if (!points?.length || width < 110) {
-    ctx.fillText("No eligible data",12,42);
-    return;
-  }
-  const left = 50, right = width-14, top = 37, bottom = height-30;
-  const max = Math.max(1,...points.flatMap(point => point.values.map(Math.abs)));
-  const axis = (top+bottom)/2;
-  const x = price => left + (price / row.spot - .95) * (right-left)/.1;
-  const y = value => axis - value/max*(bottom-top)*.47;
-  const line = (x0,y0,x1,y1,color) => {
-    ctx.strokeStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(x0,y0);
-    ctx.lineTo(x1,y1);
-    ctx.stroke();
-  };
-  for (const tick of [-max,0,max]) {
-    ctx.fillStyle = "#b2c2d3";
-    ctx.fillText(compact.format(tick),4,y(tick)+4,42);
-    line(left,y(tick),right,y(tick),tick === 0 ? "#667d97" : "#324258");
-  }
-  for (const offset of [-.05,-.025,0,.025,.05]) {
-    const price = row.spot * (1+offset);
-    ctx.fillText(number.format(price), Math.min(right-29, x(price)-17), height-9, 45);
-  }
-  if (profile) {
-    const edges = [points[0].price, ...profile.crossings.map(root => root.price), points.at(-1).price];
-    for (let i=1; i<edges.length; i++) {
-      const midpoint = (edges[i-1]+edges[i])/2;
-      const point = points.reduce((a,b) => Math.abs(b.price-midpoint) < Math.abs(a.price-midpoint) ? b : a);
-      if (!point.values[0]) continue;
-      ctx.fillStyle = point.values[0] > 0 ? "#63deae13" : "#ff9f9a13";
-      ctx.fillRect(x(edges[i-1]),top,x(edges[i])-x(edges[i-1]),bottom-top);
-    }
-    for (let index=1; index<points.length; index++) {
-      const a=points[index-1], b=points[index];
-      const ga=a.values[0], gb=b.values[0], color = v => v >= 0 ? "#63deae" : "#ff9f9a";
-      if (ga*gb < 0) {
-        const cross=x(a.price)+(x(b.price)-x(a.price))*ga/(ga-gb);
-        line(x(a.price),y(ga),cross,axis,color(ga));
-        line(cross,axis,x(b.price),y(gb),color(gb));
-      } else line(x(a.price),y(ga),x(b.price),y(gb),color(ga || gb));
-    }
-    for (const {price,band} of profile.crossings) {
-      ctx.fillStyle="#f9c87b33";
-      ctx.fillRect(x(band[0]),top,Math.max(2,x(band[1])-x(band[0])),bottom-top);
-      line(x(price),top,x(price),bottom,"#f9c87b");
-    }
-    if (Math.abs(profile.maxPain/row.spot-1)<=.05) {
-      line(x(profile.maxPain),top,x(profile.maxPain),bottom,"#a8b1e8");
-      ctx.fillStyle="#a8b1e8";
-      ctx.fillText("Max pain",Math.min(x(profile.maxPain)+4,right-55),top+12,55);
-    }
-  } else {
-    const barWidth = Math.max(1,Math.min(8,(right-left)/points.length*.72));
-    for (const p of points) {
-      for (const v of p.values) {
-        ctx.fillStyle = v>=0 ? "#63deae" : "#ff9f9a";
-        ctx.fillRect(x(p.price)-barWidth/2,Math.min(axis,y(v)),barWidth,Math.abs(y(v)-axis));
-      }
-    }
-  }
-  line(x(row.spot),top,x(row.spot),bottom,"#9aceff");
 }
 
 demo();
