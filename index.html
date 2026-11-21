@@ -72,10 +72,10 @@ code { overflow-wrap: anywhere }
     <button id="reset-price-scale" type="button" disabled>Reset price scale</button>
     <p id="analytics-status" role="status"></p>
   </div>
-  <p id="price-axis-hint">Drag the price labels to zoom. Shift-drag to pan. Double-click to reset.</p>
+  <p id="price-axis-hint">Drag the price labels to zoom. ⌘-drag or Shift-drag to pan. Double-click to reset.</p>
   <div class="chart-scroll" role="region" aria-label="Aligned replay charts, scroll horizontally on narrow screens" tabindex="0">
     <canvas id="chart" role="img" aria-label="Price candles alongside horizontal strike charts for net gamma exposure, call and put gamma exposure, open interest, and the repriced gamma profile on a shared price axis"></canvas>
-    <button id="price-axis" type="button" aria-label="Adjust price axis" aria-describedby="price-axis-hint" title="Drag to zoom the price scale" disabled></button>
+    <button id="price-axis" type="button" aria-label="Adjust price axis" aria-describedby="price-axis-hint" title="Drag to zoom, or hold Command or Shift to pan" disabled></button>
   </div>
   <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Blue dashed line: current price</span><span>Calls right · puts left</span></div>
   <p id="profile-status"></p>
@@ -542,7 +542,7 @@ priceAxis.onpointerdown = event => {
   const bounds = priceAxis.getBoundingClientRect();
   const fraction = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
   axisDrag = {id: event.pointerId, startY: event.clientY, height: bounds.height,
-    domain: activePriceDomain, fraction, pan: event.shiftKey};
+    domain: activePriceDomain, fraction, pan: event.metaKey || event.shiftKey};
   priceAxis.setPointerCapture(event.pointerId);
 };
 priceAxis.onpointermove = event => {
@@ -561,7 +561,7 @@ priceAxis.onkeydown = event => {
     resetPriceScale();
   } else if (activePriceDomain && ["ArrowUp", "ArrowDown"].includes(event.key)) {
     event.preventDefault();
-    adjustPriceDomain(activePriceDomain, event.key === "ArrowUp" ? -.08 : .08, .5, event.shiftKey);
+    adjustPriceDomain(activePriceDomain, event.key === "ArrowUp" ? -.08 : .08, .5, event.metaKey || event.shiftKey);
   }
 };
 $("reset-price-scale").onclick = resetPriceScale;
