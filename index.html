@@ -27,8 +27,13 @@ button:disabled { opacity: .5; cursor: default }
 .playback { display: flex; flex-wrap: wrap; align-items: center; gap: 10px }
 .playback input { flex: 1 1 175px }
 output { min-width: 135px; font-variant-numeric: tabular-nums }
-.chart-scroll { overflow-x: auto; border-radius: 8px; margin-top: 10px }
+.chart-scroll { position: relative; overflow-x: auto; border-radius: 8px; margin-top: 10px }
 .chart-scroll:focus-visible { outline: 2px solid #9aceff }
+#price-axis { position: absolute; left: 0; padding: 0; border: 0; border-radius: 0; background: transparent; touch-action: none; cursor: ns-resize }
+#price-axis:hover:not(:disabled) { background: #9aceff0e }
+#price-axis:focus-visible { outline: 1px solid #9aceff; outline-offset: -1px }
+#price-axis:disabled { cursor: default }
+#price-axis-hint { margin: 0 0 8px; font-size: .85rem }
 canvas { display: block; width: 100%; min-width: 930px; height: clamp(480px,59vh,680px) }
 .chart-settings { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 16px }
 details { margin-top: 12px; color: #b2c2d3 }
@@ -64,10 +69,13 @@ code { overflow-wrap: anywhere }
   <div class="chart-settings">
     <label>Expiration focus<select id="expiry-focus"><option value="all">All expiries</option><option value="same">0DTE</option><option value="largest">Largest open interest</option><option value="next">Nearest expiry</option></select></label>
     <label>Price range<select id="price-range"><option value="session">Replay range</option><option value="full">Include full gamma profile</option></select></label>
+    <button id="reset-price-scale" type="button" disabled>Reset price scale</button>
     <p id="analytics-status" role="status"></p>
   </div>
+  <p id="price-axis-hint">Drag the price labels to zoom. Shift-drag to pan. Double-click to reset.</p>
   <div class="chart-scroll" role="region" aria-label="Aligned replay charts, scroll horizontally on narrow screens" tabindex="0">
     <canvas id="chart" role="img" aria-label="Price candles alongside horizontal strike charts for net gamma exposure, call and put gamma exposure, open interest, and the repriced gamma profile on a shared price axis"></canvas>
+    <button id="price-axis" type="button" aria-label="Adjust price axis" aria-describedby="price-axis-hint" title="Drag to zoom the price scale" disabled></button>
   </div>
   <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Blue dashed line: current price</span><span>Calls right · puts left</span></div>
   <p id="profile-status"></p>
@@ -90,6 +98,10 @@ const sessions = new Map();
 const barsBySession = new Map();
 let cursor = 0;
 let timer;
+let activePriceDomain;
+let manualPriceDomain = null;
+let axisDrag;
+let redrawPriceChart;
 
 function parseTime(value) {
   const timestamp = typeof value === "string" && /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? Date.parse(value) : NaN;
@@ -232,8 +244,10 @@ function render() {
     metric("Available at · ET", map ? timeFormat.format(map.at) : null),
   );
   $("price-legend").textContent = displayBars.length ? (futures ? "ES price bars" : session.symbol + " price bars") : (futures ? "ES price bars unavailable" : "Vendor sampled spot");
-  draw(current, times[0], visible.map(row => ({...row, netGex: analyze(row,true)?.netGex ?? row.netGex})),
-    displayBars.filter(bar => bar.at <= current), mapped, futures, mapped ? mapAnalysis : null);
+  const plottedRows = visible.map(row => ({...row, netGex: analyze(row,true)?.netGex ?? row.netGex}));
+  const plottedBars = displayBars.filter(bar => bar.at <= current);
+  redrawPriceChart = () => draw(current, times[0], plottedRows, plottedBars, mapped, futures, mapped ? mapAnalysis : null);
+  redrawPriceChart();
   describeAnalytics(mapAnalysis, map, session.symbol);
 }
 
@@ -289,12 +303,20 @@ function draw(current, start, rows, bars, map, futures, analysis) {
   const net = rows.filter(row => row.netGex != null);
   const x = time => left + 4 + (right - left - 10) * (time - start) / Math.max(60000, current - start);
 
+  Object.assign(priceAxis.style, {top: top + "px", height: base - top + "px", width: left + "px"});
+  priceAxis.disabled = !values.length;
+  $("reset-price-scale").disabled = !manualPriceDomain;
   if (!values.length) {
+    activePriceDomain = null;
     label("No eligible price or gamma levels yet.", left, top + 22);
   } else {
     const min = Math.min(...values), max = Math.max(...values);
     const pad = Math.max((max - min) * .06, .01);
-    const low = min - pad, high = max + pad;
+    activePriceDomain = manualPriceDomain ?? [min - pad, max + pad];
+    const [low, high] = activePriceDomain;
+    const tickFormat = high - low < .1
+      ? new Intl.NumberFormat("en-US", {maximumFractionDigits: 6})
+      : number;
     const y = value => base - (value - low) * (base - top) / (high - low);
     if (analysis && mapSpot != null) {
       drawStrikePanels(ctx, analysis, {right, panelWidth, top, base, low, high, y, shift, line, label});
@@ -306,8 +328,12 @@ function draw(current, start, rows, bars, map, futures, analysis) {
       ctx.globalAlpha = .58;
       line(left, y(value), edge, y(value), "#324258");
       ctx.globalAlpha = 1;
-      label(number.format(value), 6, y(value) + 4, left - 12);
+      label(tickFormat.format(value), 6, y(value) + 4, left - 12);
     }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, top, edge - left, base - top);
+    ctx.clip();
     if (map?.flipBand) {
       const [lower, upper] = map.flipBand;
       ctx.fillStyle = "#f9c87b25";
@@ -336,6 +362,7 @@ function draw(current, start, rows, bars, map, futures, analysis) {
     }
     const latestPrice = bars.at(-1)?.close ?? spot.at(-1)?.spot;
     if (latestPrice != null) line(right, y(latestPrice), edge, y(latestPrice), "#9aceff", [3, 4]);
+    ctx.restore();
   }
 
   const zero = height - 57;
@@ -431,6 +458,8 @@ function drawStrikePanels(ctx, analysis, layout) {
 }
 
 function refreshSessions(key) {
+  manualPriceDomain = null;
+  axisDrag = null;
   $("session").replaceChildren(...[...sessions.keys()].map(name => new Option(name, name)));
   $("session").value = key;
   $("instrument").value = sessions.get(key).defaultInstrument ?? "underlying";
@@ -495,12 +524,68 @@ $("play").onclick = () => {
 $("prev").onclick = () => { stop(); cursor--; render(); };
 $("next").onclick = () => { stop(); cursor++; render(); };
 $("scrub").oninput = event => { stop(); cursor = Number(event.target.value); render(); };
-for (const id of ["session", "clock", "lag"]) $(id).onchange = () => { stop(); cursor = 0; render(); };
-for (const id of ["freeze", "instrument", "expiry-focus", "price-range"]) $(id).onchange = render;
-$("session").addEventListener("change", () => {
-  $("instrument").value = sessions.get($("session").value).defaultInstrument ?? "underlying";
+for (const id of ["clock", "lag"]) $(id).onchange = () => { stop(); cursor = 0; render(); };
+for (const id of ["freeze", "expiry-focus"]) $(id).onchange = render;
+for (const id of ["instrument", "price-range"]) $(id).onchange = () => {
+  manualPriceDomain = null;
+  axisDrag = null;
   render();
-});
+};
+$("session").onchange = () => {
+  stop();
+  refreshSessions($("session").value);
+};
+
+const priceAxis = $("price-axis");
+priceAxis.onpointerdown = event => {
+  if (!event.isPrimary || event.button !== 0 || !activePriceDomain) return;
+  const bounds = priceAxis.getBoundingClientRect();
+  const fraction = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
+  axisDrag = {id: event.pointerId, startY: event.clientY, height: bounds.height,
+    domain: activePriceDomain, fraction, pan: event.shiftKey};
+  priceAxis.setPointerCapture(event.pointerId);
+};
+priceAxis.onpointermove = event => {
+  if (axisDrag?.id !== event.pointerId) return;
+  const distance = event.clientY - axisDrag.startY;
+  if (distance === 0 && manualPriceDomain === null) return;
+  adjustPriceDomain(axisDrag.domain, distance / axisDrag.height, axisDrag.fraction, axisDrag.pan);
+};
+priceAxis.onlostpointercapture = event => {
+  if (axisDrag?.id === event.pointerId) axisDrag = null;
+};
+priceAxis.ondblclick = resetPriceScale;
+priceAxis.onkeydown = event => {
+  if (event.key === "Home") {
+    event.preventDefault();
+    resetPriceScale();
+  } else if (activePriceDomain && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+    event.preventDefault();
+    adjustPriceDomain(activePriceDomain, event.key === "ArrowUp" ? -.08 : .08, .5, event.shiftKey);
+  }
+};
+$("reset-price-scale").onclick = resetPriceScale;
+
+function adjustPriceDomain([low, high], distance, fraction, pan) {
+  const span = high - low;
+  const anchor = high - span * fraction;
+  if (pan) {
+    const offset = distance * span;
+    manualPriceDomain = [low + offset, high + offset];
+  } else {
+    const minSpan = Math.max(Math.abs(anchor) * .00001, .0001);
+    const maxSpan = Math.max(Math.abs(anchor) * 20, 10);
+    const nextSpan = Math.min(maxSpan, Math.max(minSpan, span * Math.exp(distance * 2)));
+    manualPriceDomain = [anchor - nextSpan * (1 - fraction), anchor + nextSpan * fraction];
+  }
+  redrawPriceChart();
+}
+
+function resetPriceScale() {
+  manualPriceDomain = null;
+  axisDrag = null;
+  redrawPriceChart?.();
+}
 
 $("capture").onchange = async event => {
   stop();
