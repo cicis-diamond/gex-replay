@@ -110,6 +110,7 @@ code { overflow-wrap: anywhere }
   </details>
   <details>
     <summary>Importing market data</summary>
+    <p>Open Import capture JSON and choose your Robinhood SPY capture files. Each date appears under Robinhood SPY captures in Session. The candles are included in these files. The page reads your captures in this browser tab.</p>
     <p>For the strike charts, import capture JSON with timestamped option chains. Each snapshot needs <code>symbol, expiry, expiration, snapshotAt, observedAt, spot, contracts</code>. Each contract needs <code>strike, expirationAt, right, iv, gamma, openInterest</code>. Use <code>C</code> or <code>P</code>, decimal IV, and offset-aware timestamps including the contract’s actual AM or PM settlement time. Use null for unknown observed time and select Historical estimate. The browser reads these files locally.</p>
     <p>Price CSV accepts <code>timestamp,open,high,low,close</code> with bar-close timestamps, or a Sierra Chart one-minute Write Bar Data to File export with UTC enabled and YYYY/MM/DD selected. For SPX options with ES bars, select ES (SPX basis). The chart maps each SPX level using the latest eligible ES close at or before the SPX quote, within two minutes.</p>
   </details>
@@ -309,6 +310,9 @@ function render() {
   $("lag-label").style.display = historical ? "grid" : "none";
   $("time").textContent = current === undefined ? "No replay times" : session.archive ? sessionDate(current) + " close" : timeFormat.format(current) + " ET";
   $("status").textContent = [
+    session.source === "Robinhood SPY capture" ? "Robinhood SPY capture · Options snapshot appears at its recorded availability time." : "",
+    last?.coverage && Number.isInteger(last.coverage.usable) && Number.isInteger(last.coverage.listed)
+      ? `${last.coverage.usable} of ${last.coverage.listed} listed contracts usable.` : "",
     session.source === "Synthetic demo" ? "Synthetic demo data." : "",
     session.archive ? "Real SPY historical data · One candle and options snapshot per trading day. Each step shows the map at that day’s close. Original feed arrival times are unknown." : historical ? "Historical estimate. Availability is assumed." : "Observed availability.",
     !rows.length ? "No gamma snapshots were available on this session date under the selected clock." : "",
@@ -554,10 +558,26 @@ function drawStrikePanels(ctx, analysis, layout) {
 function refreshSessions(key) {
   manualPriceDomain = null;
   axisDrag = null;
-  $("session").replaceChildren(...[...sessions.keys()].map(name => new Option(name, name)));
+  const groups = new Map();
+  for (const [name, session] of sessions) {
+    const label = session.archive ? "Historical SPY archive"
+      : session.source === "Synthetic demo" ? "Synthetic demo"
+      : session.source === "Robinhood SPY capture" ? "Robinhood SPY captures" : "Imported sessions";
+    if (!groups.has(label)) {
+      const group = document.createElement("optgroup");
+      group.label = label;
+      groups.set(label, group);
+    }
+    groups.get(label).append(new Option(name, name));
+  }
+  $("session").replaceChildren(...groups.values());
   $("session").value = key;
   $("instrument").value = sessions.get(key).defaultInstrument ?? "underlying";
   $("expiry-focus").value = sessions.get(key).archive ? "next" : "all";
+  if (sessions.get(key).source === "Robinhood SPY capture") {
+    $("clock").value = "observed";
+    $("freeze").checked = false;
+  }
   cursor = 0;
   render();
 }
@@ -687,7 +707,12 @@ $("capture").onchange = async event => {
   $("error").textContent = "";
   let key = $("session").value;
   for (const file of event.target.files) {
-    try { key = importCapture(JSON.parse(await file.text())); }
+    try {
+      const capture = JSON.parse(await file.text());
+      const bars = capture.priceBarsCsv == null ? null : parseBars(capture.priceBarsCsv, capture.date);
+      key = importCapture(capture);
+      if (bars) barsBySession.set(key, bars);
+    }
     catch (error) { $("error").textContent += file.name + " — " + error.message + " "; }
   }
   refreshSessions(key);
