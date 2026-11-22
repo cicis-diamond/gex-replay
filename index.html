@@ -66,7 +66,7 @@ code { overflow-wrap: anywhere }
 </style>
 </head>
 <body>
-<header><h1>GEX Replay</h1><p>Press Play or drag the timeline to see how price and gamma levels evolve. The built-in session uses synthetic data.</p></header>
+<header><h1>GEX Replay</h1><p>Press Play or drag the timeline to step through SPY closes and their options snapshots. Use Session to switch to the synthetic intraday practice data.</p></header>
 <div class="toolbar">
   <label>Session<select id="session" aria-label="Session"></select></label>
   <label>Replay clock<select id="clock"><option value="observed">Observed</option><option value="history">Historical estimate</option></select></label>
@@ -78,6 +78,7 @@ code { overflow-wrap: anywhere }
 </div>
 <p id="error" role="alert"></p>
 <p id="status" role="status"></p>
+<p id="archive-source" hidden>Source: <a style="color:#9aceff" href="https://github.com/anahatsingh-ui/options-dataset-hist">Philipp D. Dubach’s historical options dataset</a>. Gamma is modeled from the nearest expiry after each close.</p>
 <section>
   <div class="playback">
     <button id="prev" aria-label="Previous timestamp">←</button>
@@ -254,11 +255,11 @@ function parseBars(text, date) {
 
 function selection() {
   const session = sessions.get($("session").value);
-  const historical = $("clock").value === "history";
+  const historical = !session.archive && $("clock").value === "history";
   const lag = Math.min(1440, Math.max(0, Number($("lag").value) || 0));
   const rows = [...session.rows.values()].map(row => ({
-    ...row, at: historical ? row.snapshotAt + lag * 60000 : row.observedAt,
-  })).filter(row => row.at != null && sessionDate(row.at) === session.date)
+    ...row, at: session.archive ? row.snapshotAt : historical ? row.snapshotAt + lag * 60000 : row.observedAt,
+  })).filter(row => row.at != null && (session.archive || sessionDate(row.at) === session.date))
     .sort((a, b) => a.at - b.at || a.snapshotAt - b.snapshotAt);
   const bars = barsBySession.get($("session").value) ?? [];
   const times = [...new Set([...rows.map(row => row.at), ...bars.map(bar => bar.at)])].sort((a, b) => a - b);
@@ -281,8 +282,10 @@ function render() {
   const current = times[cursor];
   const visible = rows.filter(row => row.at <= current);
   const last = visible.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
-  const mapRows = $("freeze").checked ? visible.filter(row => timeFormat.format(row.at) < "09:30:00") : visible;
+  const mapRows = !session.archive && $("freeze").checked ? visible.filter(row => timeFormat.format(row.at) < "09:30:00") : visible;
   const mapRow = mapRows.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
+  for (const id of ["clock", "freeze", "instrument", "expiry-focus", "bars"]) $(id).disabled = Boolean(session.archive);
+  $("archive-source").hidden = !session.archive;
   const mapAnalysis = analyze(mapRow);
   const lastAnalysis = last === mapRow ? mapAnalysis : analyze(last);
   const map = mapAnalysis ? {...mapRow, ...mapAnalysis.levels} : mapRow;
@@ -296,12 +299,12 @@ function render() {
   $("play").disabled = times.length < 2;
   $("scrub").disabled = times.length < 2;
   $("lag-label").style.display = historical ? "grid" : "none";
-  $("time").textContent = current === undefined ? "No replay times" : timeFormat.format(current) + " ET";
+  $("time").textContent = current === undefined ? "No replay times" : session.archive ? sessionDate(current) + " close" : timeFormat.format(current) + " ET";
   $("status").textContent = [
     session.source === "Synthetic demo" ? "Synthetic demo data." : "",
-    historical ? "Historical estimate. Availability is assumed." : "Observed availability.",
+    session.archive ? "Real SPY historical data · One candle and options snapshot per trading day. Each step shows the map at that day’s close. Original feed arrival times are unknown." : historical ? "Historical estimate. Availability is assumed." : "Observed availability.",
     !rows.length ? "No gamma snapshots were available on this session date under the selected clock." : "",
-    $("freeze").checked && !map ? "No eligible premarket map." : "",
+    !session.archive && $("freeze").checked && !map ? "No eligible premarket map." : "",
     futures && session.symbol !== "SPX" ? "ES mapping requires SPX options and ES bars." : "",
     futures && session.symbol === "SPX" && map && !mapped ? "ES levels unavailable without a synchronized ES bar." : "",
   ].filter(Boolean).join(" ");
@@ -309,18 +312,23 @@ function render() {
     metric(session.symbol + " snapshot spot", last?.spot == null ? null : number.format(last.spot)),
     metric("Net GEX", (lastAnalysis?.netGex ?? last?.netGex) == null ? null : compact.format(lastAnalysis?.netGex ?? last.netGex)),
     ...Object.entries(fields).map(([field, [label]]) => metric((field === "flip" && !mapAnalysis ? "Vendor HVL" : label) + (futures ? " · ES" : ""), mapped?.[field] == null ? null : number.format(mapped[field]))),
-    metric("Map snapshot · ET", map ? timeFormat.format(map.snapshotAt) : null),
-    metric("Available at · ET", map ? timeFormat.format(map.at) : null),
+    ...(session.archive ? [
+      metric("Map date", map ? sessionDate(map.snapshotAt) : null),
+      metric("Options expiry", map?.expiration),
+    ] : [
+      metric("Map snapshot · ET", map ? timeFormat.format(map.snapshotAt) : null),
+      metric("Available at · ET", map ? timeFormat.format(map.at) : null),
+    ]),
   );
   $("price-legend").textContent = displayBars.length ? (futures ? "ES price bars" : session.symbol + " price bars") : (futures ? "ES price bars unavailable" : "Vendor sampled spot");
   const plottedRows = visible.map(row => ({...row, netGex: analyze(row,true)?.netGex ?? row.netGex}));
   const plottedBars = displayBars.filter(bar => bar.at <= current);
-  redrawPriceChart = () => draw(current, times[0], plottedRows, plottedBars, mapped, futures, mapped ? mapAnalysis : null);
+  redrawPriceChart = () => draw(current, times[0], plottedRows, plottedBars, mapped, futures, mapped ? mapAnalysis : null, session.archive);
   redrawPriceChart();
   describeAnalytics(mapAnalysis, map, session.symbol);
 }
 
-function draw(current, start, rows, bars, map, futures, analysis) {
+function draw(current, start, rows, bars, map, futures, analysis, archive) {
   const canvas = $("chart");
   const {width, height} = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
@@ -443,7 +451,13 @@ function draw(current, start, rows, bars, map, futures, analysis) {
       line(x(point.at), zero, x(point.at), zero - 24 * point.netGex / max, point.netGex >= 0 ? "#63deae" : "#ff9f9a");
     }
   }
-  if (Number.isFinite(current)) {
+  if (archive && bars.length) {
+    const count = Math.min(5, bars.length);
+    for (let i = 0; i < count; i++) {
+      const bar = bars[Math.round(i * (bars.length - 1) / Math.max(1, count - 1))];
+      label(sessionDate(bar.at).slice(5), Math.min(right - 35, x(bar.at)), height - 10);
+    }
+  } else if (Number.isFinite(current)) {
     const labels = current - start >= 30 * 60000 ? 5 : current > start ? 2 : 1;
     for (let i = 0; i < labels; i++) {
       const t = start + (current - start) * i / Math.max(1, labels - 1);
@@ -532,6 +546,7 @@ function refreshSessions(key) {
   $("session").replaceChildren(...[...sessions.keys()].map(name => new Option(name, name)));
   $("session").value = key;
   $("instrument").value = sessions.get(key).defaultInstrument ?? "underlying";
+  $("expiry-focus").value = sessions.get(key).archive ? "next" : "all";
   cursor = 0;
   render();
 }
@@ -795,7 +810,40 @@ function describeAnalytics(analysis, row, symbol) {
   $("profile-status").textContent = labels.filter(Boolean).join(" ");
 }
 
+async function loadPublicArchive() {
+  const initial = $("session").value;
+  try {
+    const response = await fetch("spy-history.json");
+    if (!response.ok) throw new Error("History could not be loaded.");
+    const archive = await response.json();
+    const key = "SPY historical · Daily closes · Apr 7–17, 2025";
+    const rows = new Map();
+    const bars = [];
+    for (const [date, expiration, open, high, low, close, chain] of archive.sessions) {
+      const at = parseTime(date + "T16:00:00-04:00");
+      const expirationAt = parseTime(expiration + "T16:15:00-04:00");
+      const contracts = chain.map(([strike, right, iv, gamma, openInterest]) => ({
+        strike, right, iv, gamma, openInterest, expirationAt, multiplier: 100,
+      }));
+      rows.set(date, {symbol: "SPY", spot: close, expiration, snapshotAt: at, observedAt: null, contracts});
+      bars.push({at, open, high, low, close});
+    }
+    if (!rows.size) throw new Error("History has no sessions.");
+    sessions.set(key, {symbol: "SPY", source: archive.source, archive: true, rows});
+    barsBySession.set(key, bars);
+    if ($("session").value === initial) {
+      stop();
+      refreshSessions(key);
+    } else {
+      $("session").add(new Option(key, key));
+    }
+  } catch (error) {
+    $("error").textContent = "Could not load the historical SPY sample. " + error.message;
+  }
+}
+
 demo();
+if (location.protocol !== "file:") loadPublicArchive();
 
 const practiceScenarios = [
   {
