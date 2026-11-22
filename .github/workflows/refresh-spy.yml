@@ -1,0 +1,49 @@
+name: Refresh SPY replay
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "19 23 * * 1-5"
+  push:
+    branches: [main]
+    paths:
+      - index.html
+      - scripts/build_spy_archive.py
+      - .github/workflows/refresh-spy.yml
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pyarrow==26.0.1
+      - run: python scripts/build_spy_archive.py
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GEX Replay
+        id: deployment
+        uses: actions/deploy-pages@v4
