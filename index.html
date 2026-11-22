@@ -378,7 +378,10 @@ function draw(current, start, rows, bars, map, futures, analysis, archive) {
     values.push(analysis.profile[0].price + shift, analysis.profile.at(-1).price + shift);
   }
   const net = rows.filter(row => row.netGex != null);
-  const x = time => left + 4 + (right - left - 10) * (time - start) / Math.max(60000, current - start);
+  const sessionPositions = archive ? new Map(bars.map((bar, index) => [bar.at, index])) : null;
+  const x = time => left + 4 + (right - left - 10) * (sessionPositions
+    ? sessionPositions.get(time) / Math.max(1, bars.length - 1)
+    : (time - start) / Math.max(60000, current - start));
 
   Object.assign(priceAxis.style, {top: top + "px", height: base - top + "px", width: left + "px"});
   priceAxis.disabled = !values.length;
@@ -813,15 +816,19 @@ function describeAnalytics(analysis, row, symbol) {
 async function loadPublicArchive() {
   const initial = $("session").value;
   try {
-    const response = await fetch("spy-history.json");
+    const response = await fetch("spy-history-2025.json");
     if (!response.ok) throw new Error("History could not be loaded.");
-    const archive = await response.json();
-    const key = "SPY historical · Daily closes · Apr 7–17, 2025";
+    const {gzip} = await response.json();
+    const bytes = Uint8Array.from(atob(gzip), character => character.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+    const archive = await new Response(stream).json();
     const rows = new Map();
     const bars = [];
-    for (const [date, expiration, open, high, low, close, chain] of archive.sessions) {
-      const at = parseTime(date + "T16:00:00-04:00");
-      const expirationAt = parseTime(expiration + "T16:15:00-04:00");
+    for (const [snapshot, expiry, open, high, low, close, chain] of archive.sessions) {
+      const at = parseTime(snapshot);
+      const expirationAt = parseTime(expiry);
+      const date = sessionDate(at);
+      const expiration = sessionDate(expirationAt);
       const contracts = chain.map(([strike, right, iv, gamma, openInterest]) => ({
         strike, right, iv, gamma, openInterest, expirationAt, multiplier: 100,
       }));
@@ -829,6 +836,9 @@ async function loadPublicArchive() {
       bars.push({at, open, high, low, close});
     }
     if (!rows.size) throw new Error("History has no sessions.");
+    const firstDay = sessionDate(bars[0].at);
+    const lastDay = sessionDate(bars.at(-1).at);
+    const key = `SPY historical · ${firstDay} to ${lastDay}`;
     sessions.set(key, {symbol: "SPY", source: archive.source, archive: true, rows});
     barsBySession.set(key, bars);
     if ($("session").value === initial) {
