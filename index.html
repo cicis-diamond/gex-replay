@@ -78,7 +78,7 @@ code { overflow-wrap: anywhere }
 </div>
 <p id="error" role="alert"></p>
 <p id="status" role="status"></p>
-<p id="archive-source" hidden>Source: <a style="color:#9aceff" href="https://github.com/anahatsingh-ui/options-dataset-hist">Philipp D. Dubach’s historical options dataset</a>. Gamma is modeled from the nearest expiry after each close.</p>
+<p id="archive-source" hidden>Source: <a style="color:#9aceff" href="https://github.com/anahatsingh-ui/options-dataset-hist">Philipp D. Dubach’s historical options dataset</a>. Gamma is modeled from the nearest expiry after each close. The replay ends at the latest date covered by the source archive.</p>
 <section>
   <div class="playback">
     <button id="prev" aria-label="Previous timestamp">←</button>
@@ -101,6 +101,11 @@ code { overflow-wrap: anywhere }
   </div>
   <div class="legend"><span id="price-legend">Sampled spot</span><span class="call">Call wall</span><span class="flip">Gamma flip / vendor HVL</span><span class="put">Put wall</span><span>Blue dashed line: current price</span><span>Calls right · puts left</span></div>
   <p id="profile-status"></p>
+  <details>
+    <summary>How option levels line up with price</summary>
+    <p>In the historical SPY replay, the price candles and options both reference SPY. The call and put walls are SPY strike prices. The gamma flip is the modeled SPY price where net exposure crosses zero. All three read directly against the SPY price axis.</p>
+    <p>For imported SPX options displayed with ES prices, the replay adds the synchronized ES close minus SPX spot to each level. If SPX is 6,600 and ES is 6,625, a 6,610 SPX wall appears at 6,635 ES. The offset is calculated at the snapshot using the latest eligible ES bar within two minutes. The options and gamma calculations still come from SPX.</p>
+  </details>
   <details>
     <summary>Importing market data</summary>
     <p>For the strike charts, import capture JSON with timestamped option chains. Each snapshot needs <code>symbol, expiry, expiration, snapshotAt, observedAt, spot, contracts</code>. Each contract needs <code>strike, expirationAt, right, iv, gamma, openInterest</code>. Use <code>C</code> or <code>P</code>, decimal IV, and offset-aware timestamps including the contract’s actual AM or PM settlement time. Use null for unknown observed time and select Historical estimate. The browser reads these files locally.</p>
