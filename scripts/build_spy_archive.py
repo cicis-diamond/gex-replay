@@ -97,9 +97,14 @@ def main():
                              separators=(",", ":"), allow_nan=False)
     output = Path("_site")
     output.mkdir(exist_ok=True)
-    shutil.copyfile("index.html", output / "index.html")
+    archive_name = f"spy-archive-{revision[:12]}.json"
+    page = Path("index.html").read_text(encoding="utf-8")
+    placeholder = '"spy-history-2025.json"'
+    if page.count(placeholder) != 1:
+        raise ValueError("Expected one archive filename in the replay page.")
+    (output / "index.html").write_text(page.replace(placeholder, json.dumps(archive_name)), encoding="utf-8")
     packed = base64.b64encode(gzip.compress(payload.encode(), mtime=0)).decode()
-    (output / "spy-history-2025.json").write_text(json.dumps({"gzip": packed}) + "\n")
+    (output / archive_name).write_text(json.dumps({"gzip": packed}) + "\n")
     print(f"Built {len(sessions)} SPY sessions from {sessions[0][0][:10]} through {sessions[-1][0][:10]} ({revision}).")
 
 
