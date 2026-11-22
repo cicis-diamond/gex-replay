@@ -3,6 +3,7 @@ import base64
 from collections import defaultdict
 from datetime import date, datetime
 import gzip
+from itertools import groupby
 import json
 import math
 from pathlib import Path
@@ -16,7 +17,7 @@ import pyarrow.parquet as pq
 
 REPO = "anahatsingh-ui/options-dataset-hist"
 API = f"https://api.github.com/repos/{REPO}"
-START = "2025-01-01"
+START = "2008-01-01"
 ET = ZoneInfo("America/New_York")
 
 
@@ -76,7 +77,7 @@ def main():
     raw = f"https://raw.githubusercontent.com/{REPO}/{revision}"
     files = get_json(f"{API}/contents/spy?ref={revision}")
     names = sorted(item["name"] for item in files if re.fullmatch(r"options_\d{4}\.parquet", item["name"])
-                   and 2025 <= int(item["name"][8:12]) <= date.today().year)
+                   and 2008 <= int(item["name"][8:12]) <= date.today().year)
     with TemporaryDirectory() as directory:
         root = Path(directory)
         prices = root / "underlying_prices.parquet"
@@ -92,20 +93,29 @@ def main():
                 path.unlink()
 
         sessions = build(prices, option_files())
-        payload = json.dumps({"source": "Philipp D. Dubach", "revision": revision,
-                              "license": license_path.read_text(), "sessions": sessions},
-                             separators=(",", ":"), allow_nan=False)
+        license_text = license_path.read_text(encoding="utf-8")
     output = Path("_site")
     output.mkdir(exist_ok=True)
-    archive_name = f"spy-archive-{revision[:12]}.json"
+    prefix = f"spy-years-{revision[:12]}"
+    manifest_name = f"{prefix}.json"
+    source = "Philipp D. Dubach"
+    years = {}
+    for year, rows in groupby(sessions, key=lambda row: row[0][:4]):
+        filename = f"{prefix}-{year}.json"
+        payload = json.dumps({"source": source, "revision": revision, "license": license_text,
+                              "sessions": list(rows)}, separators=(",", ":"), allow_nan=False)
+        packed = base64.b64encode(gzip.compress(payload.encode(), mtime=0)).decode()
+        (output / filename).write_text(json.dumps({"gzip": packed}) + "\n", encoding="utf-8")
+        years[year] = filename
+    manifest = {"years": years, "first": sessions[0][0][:10], "last": sessions[-1][0][:10]}
+    (output / manifest_name).write_text(json.dumps(manifest) + "\n", encoding="utf-8")
     page = Path("index.html").read_text(encoding="utf-8")
     placeholder = '"spy-history-2025.json"'
     if page.count(placeholder) != 1:
         raise ValueError("Expected one archive filename in the replay page.")
-    (output / "index.html").write_text(page.replace(placeholder, json.dumps(archive_name)), encoding="utf-8")
-    packed = base64.b64encode(gzip.compress(payload.encode(), mtime=0)).decode()
-    (output / archive_name).write_text(json.dumps({"gzip": packed}) + "\n")
-    print(f"Built {len(sessions)} SPY sessions from {sessions[0][0][:10]} through {sessions[-1][0][:10]} ({revision}).")
+    (output / "index.html").write_text(page.replace(placeholder, json.dumps(manifest_name)), encoding="utf-8")
+    print(f"Built {len(sessions)} SPY sessions in {len(years)} years, "
+          f"from {manifest['first']} through {manifest['last']} ({revision}).")
 
 
 if __name__ == "__main__":
