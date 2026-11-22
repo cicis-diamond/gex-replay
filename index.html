@@ -63,12 +63,14 @@ code { overflow-wrap: anywhere }
 .guide-steps { margin: 8px 0; padding-left: 22px; }
 .guide-steps li { margin: 8px 0; padding-left: 3px; color: #b2c2d3; }
 .guide-steps strong { color: #e4edf7; }
+#archive-year-label[hidden] { display: none; }
 </style>
 </head>
 <body>
 <header><h1>GEX Replay</h1><p>Press Play or drag the timeline to step through SPY closes and their options snapshots. Use Session to switch to the synthetic intraday practice data.</p></header>
 <div class="toolbar">
   <label>Session<select id="session" aria-label="Session"></select></label>
+  <label id="archive-year-label" hidden>SPY year<select id="archive-year"></select></label>
   <label>Replay clock<select id="clock"><option value="observed">Observed</option><option value="history">Historical estimate</option></select></label>
   <label id="lag-label" hidden>Lag (minutes)<input id="lag" type="number" min="0" max="1440" value="15"></label>
   <label class="check"><input type="checkbox" id="freeze">Freeze levels before open</label>
@@ -78,7 +80,7 @@ code { overflow-wrap: anywhere }
 </div>
 <p id="error" role="alert"></p>
 <p id="status" role="status"></p>
-<p id="archive-source" hidden>Source: <a style="color:#9aceff" href="https://github.com/anahatsingh-ui/options-dataset-hist">Philipp D. Dubach’s historical options dataset</a>. Gamma is modeled from the nearest expiry after each close. The replay ends at the latest date covered by the source archive.</p>
+<p id="archive-source" hidden>Source: <a style="color:#9aceff" href="https://github.com/anahatsingh-ui/options-dataset-hist">Philipp D. Dubach’s historical options dataset</a>. Gamma is modeled from the nearest expiry after each close. The replay ends at the latest date covered by the source archive.<span id="archive-coverage"></span></p>
 <section>
   <div class="playback">
     <button id="prev" aria-label="Previous timestamp">←</button>
@@ -291,6 +293,7 @@ function render() {
   const mapRow = mapRows.reduce((latest, row) => !latest || row.snapshotAt > latest.snapshotAt ? row : latest, null);
   for (const id of ["clock", "freeze", "instrument", "expiry-focus", "bars"]) $(id).disabled = Boolean(session.archive);
   $("archive-source").hidden = !session.archive;
+  $("archive-year-label").hidden = !session.archive || !archiveFiles;
   const mapAnalysis = analyze(mapRow);
   const lastAnalysis = last === mapRow ? mapAnalysis : analyze(last);
   const map = mapAnalysis ? {...mapRow, ...mapAnalysis.levels} : mapRow;
@@ -818,42 +821,82 @@ function describeAnalytics(analysis, row, symbol) {
   $("profile-status").textContent = labels.filter(Boolean).join(" ");
 }
 
+let archiveFiles;
+let loadedArchiveYear;
+let archiveKey;
+
+async function fetchArchiveFile(filename) {
+  const response = await fetch(filename);
+  if (!response.ok) throw new Error("History could not be loaded.");
+  return response.json();
+}
+
+async function showPublicArchive(file, expectedSelection) {
+  const bytes = Uint8Array.from(atob(file.gzip), character => character.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+  const archive = await new Response(stream).json();
+  const rows = new Map();
+  const bars = [];
+  for (const [snapshot, expiry, open, high, low, close, chain] of archive.sessions) {
+    const at = parseTime(snapshot);
+    const expirationAt = parseTime(expiry);
+    const date = sessionDate(at);
+    const expiration = sessionDate(expirationAt);
+    const contracts = chain.map(([strike, right, iv, gamma, openInterest]) => ({
+      strike, right, iv, gamma, openInterest, expirationAt, multiplier: 100,
+    }));
+    rows.set(date, {symbol: "SPY", spot: close, expiration, snapshotAt: at, observedAt: null, contracts});
+    bars.push({at, open, high, low, close});
+  }
+  if (!rows.size) throw new Error("History has no sessions.");
+  const firstDay = sessionDate(bars[0].at);
+  const lastDay = sessionDate(bars.at(-1).at);
+  const current = $("session").value;
+  const previous = archiveKey;
+  archiveKey = `SPY historical · ${firstDay} to ${lastDay}`;
+  sessions.delete(previous);
+  barsBySession.delete(previous);
+  sessions.set(archiveKey, {symbol: "SPY", source: archive.source, archive: true, rows});
+  barsBySession.set(archiveKey, bars);
+  stop();
+  refreshSessions(current === expectedSelection || current === previous ? archiveKey : current);
+}
+
+async function loadArchiveYear(year) {
+  const picker = $("archive-year");
+  picker.disabled = true;
+  const expectedSelection = $("session").value;
+  $("error").textContent = "";
+  try {
+    await showPublicArchive(await fetchArchiveFile(archiveFiles[year]), expectedSelection);
+    loadedArchiveYear = year;
+  } catch (error) {
+    $("error").textContent = "Could not load SPY history for " + year + ". " + error.message;
+  } finally {
+    picker.value = loadedArchiveYear ?? year;
+    picker.disabled = false;
+  }
+}
+
 async function loadPublicArchive() {
   const initial = $("session").value;
   try {
-    const response = await fetch("spy-history-2025.json");
-    if (!response.ok) throw new Error("History could not be loaded.");
-    const {gzip} = await response.json();
-    const bytes = Uint8Array.from(atob(gzip), character => character.charCodeAt(0));
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-    const archive = await new Response(stream).json();
-    const rows = new Map();
-    const bars = [];
-    for (const [snapshot, expiry, open, high, low, close, chain] of archive.sessions) {
-      const at = parseTime(snapshot);
-      const expirationAt = parseTime(expiry);
-      const date = sessionDate(at);
-      const expiration = sessionDate(expirationAt);
-      const contracts = chain.map(([strike, right, iv, gamma, openInterest]) => ({
-        strike, right, iv, gamma, openInterest, expirationAt, multiplier: 100,
-      }));
-      rows.set(date, {symbol: "SPY", spot: close, expiration, snapshotAt: at, observedAt: null, contracts});
-      bars.push({at, open, high, low, close});
+    const file = await fetchArchiveFile("spy-history-2025.json");
+    if (!file.years) {
+      await showPublicArchive(file, initial);
+      return;
     }
-    if (!rows.size) throw new Error("History has no sessions.");
-    const firstDay = sessionDate(bars[0].at);
-    const lastDay = sessionDate(bars.at(-1).at);
-    const key = `SPY historical · ${firstDay} to ${lastDay}`;
-    sessions.set(key, {symbol: "SPY", source: archive.source, archive: true, rows});
-    barsBySession.set(key, bars);
-    if ($("session").value === initial) {
-      stop();
-      refreshSessions(key);
-    } else {
-      $("session").add(new Option(key, key));
-    }
+    archiveFiles = file.years;
+    const years = Object.keys(archiveFiles).sort().reverse();
+    $("archive-year").replaceChildren(...years.map(year => new Option(year, year)));
+    $("archive-year").onchange = event => loadArchiveYear(event.target.value);
+    const latest = years[0];
+    await showPublicArchive(await fetchArchiveFile(archiveFiles[latest]), initial);
+    loadedArchiveYear = latest;
+    $("archive-year").value = latest;
+    $("archive-coverage").textContent = ` Archive coverage is ${file.first} to ${file.last}.`;
   } catch (error) {
-    $("error").textContent = "Could not load the historical SPY sample. " + error.message;
+    $("error").textContent = "Could not load the historical SPY archive. " + error.message;
   }
 }
 
